@@ -75,6 +75,7 @@ spawn-at-startup "waybar"
 spawn-at-startup "quickshell"
 spawn-at-startup "/home/r3dg0d/.local/bin/siva-llm"
 spawn-at-startup "/home/r3dg0d/.local/bin/siva-daemon"
+spawn-at-startup "/home/r3dg0d/.local/bin/siva-wake"
 
 hotkey-overlay {
     skip-at-startup

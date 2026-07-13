@@ -8,4 +8,5 @@ ShellRoot {
     VoiceOverlay {}
     WorkspacePreview {}
     Siva {}
+    SivaEnroll {}
 }

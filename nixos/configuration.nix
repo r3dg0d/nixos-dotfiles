@@ -144,7 +144,10 @@ in
    chromium
    alsa-utils
    lm_sensors
-   python3
+   # SIVA wake word: openWakeWord runs on this interpreter
+   (python3.withPackages (ps: with ps; [
+     numpy scipy scikit-learn onnxruntime tqdm requests
+   ]))
    vim
    neovim
    ripgrep
