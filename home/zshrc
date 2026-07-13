@@ -1,0 +1,23 @@
+# zsh-autocomplete (must load before compinit)
+_ac=$(echo /nix/store/*zsh-autocomplete*/share/zsh-autocomplete/zsh-autocomplete.plugin.zsh(N[1]) 2>/dev/null)
+[[ -f "$_ac" ]] && source "$_ac"
+unset _ac
+
+# zsh-syntax-highlighting (must load last)
+_sh=$(echo /nix/store/*zsh-syntax-highlighting*/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh(N[1]) 2>/dev/null)
+[[ -f "$_sh" ]] && source "$_sh"
+unset _sh
+
+# Prompt
+PS1='(λ)³ [hope] > '
+
+# Shader picker — runs once per boot when inside Ghostty.
+# Opens on the first new window; skipped on every subsequent one.
+# Run `ghostty-shader-pick` manually at any time to re-pick.
+if [[ -n "$GHOSTTY_RESOURCES_DIR" && ! -f "/tmp/.ghostty-shader-picked-${UID}" ]]; then
+    touch "/tmp/.ghostty-shader-picked-${UID}"
+    ghostty-shader-pick
+fi
+
+# Run fastfetch on new shell
+fastfetch

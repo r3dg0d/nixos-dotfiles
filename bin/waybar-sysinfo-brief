@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Brief CPU+RAM% for the Waybar sysinfo button label
+CPU=$(awk '/^cpu /{t=$2+$3+$4+$5+$6+$7+$8; i=$5; printf "%d",(1-i/t)*100; exit}' /proc/stat)
+RAM=$(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf "%d",100-a/t*100}' /proc/meminfo)
+printf '{"text":"󰍛 %d%%  %d%%","tooltip":"Click for full system info","class":"sysinfo"}\n' "$CPU" "$RAM"

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Interactive Ghostty shader picker.
+# Runs once per session (on first Ghostty open) or manually at any time.
+
+SHADER_DIR="${HOME}/.config/ghostty/shaders"
+GHOSTTY_CONFIG="${HOME}/.config/ghostty/config"
+
+mapfile -t shaders < <(find "$SHADER_DIR" -maxdepth 1 -name "*.glsl" | sort)
+
+if [[ ${#shaders[@]} -eq 0 ]]; then
+    echo "No shaders found in $SHADER_DIR"
+    return 0 2>/dev/null; exit 0
+fi
+
+# Resolve current shader (expand ~ so comparison works)
+current=$(grep "^custom-shader" "$GHOSTTY_CONFIG" 2>/dev/null \
+    | sed "s|^custom-shader *= *||; s|~|$HOME|")
+
+# ── Header ────────────────────────────────────────────────────────────────────
+printf "\n"
+printf "  \e[38;2;252;186;3m\e[1m  Ghostty Shader Picker\e[0m\n"
+printf "  \e[38;2;40;40;40m─────────────────────────────────────────\e[0m\n\n"
+
+for i in "${!shaders[@]}"; do
+    name=$(basename "${shaders[$i]}" .glsl)
+    if [[ "${shaders[$i]}" == "$current" ]]; then
+        printf "  \e[38;2;252;186;3m● %2d)  %-34s ← active\e[0m\n" \
+            "$((i+1))" "$name"
+    else
+        printf "  \e[38;2;60;60;60m○\e[0m \e[38;2;120;120;120m%2d)\e[0m  \e[38;2;200;200;200m%-34s\e[0m\n" \
+            "$((i+1))" "$name"
+    fi
+done
+
+printf "\n"
+printf "  \e[38;2;80;80;80mSelect [1–%d] or Enter to keep current: \e[0m" "${#shaders[@]}"
+read -r choice
+
+# ── Empty → keep current ──────────────────────────────────────────────────────
+if [[ -z "$choice" ]]; then
+    printf "\n"
+    return 0 2>/dev/null; exit 0
+fi
+
+# ── Validate ──────────────────────────────────────────────────────────────────
+if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#shaders[@]} )); then
+    printf "  \e[38;2;255;32;32m✗  Invalid selection.\e[0m\n\n"
+    return 1 2>/dev/null; exit 1
+fi
+
+selected="${shaders[$((choice-1))]}"
+selected_cfg="~/.config/ghostty/shaders/$(basename "$selected")"
+
+# ── Write config ──────────────────────────────────────────────────────────────
+if grep -q "^custom-shader" "$GHOSTTY_CONFIG"; then
+    sed -i "s|^custom-shader = .*|custom-shader = ${selected_cfg}|" "$GHOSTTY_CONFIG"
+else
+    printf "\ncustom-shader = %s\n" "$selected_cfg" >> "$GHOSTTY_CONFIG"
+fi
+
+printf "\n"
+printf "  \e[38;2;252;186;3m✓\e[0m  Active: \e[1m%s\e[0m\n" \
+    "$(basename "$selected" .glsl)"
+printf "  \e[38;2;60;60;60mReload with Ctrl+Shift+,  (no restart needed)\e[0m\n\n"

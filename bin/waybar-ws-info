@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+# Workspace + window tooltip for Waybar
+import json, subprocess, sys
+
+def run(cmd):
+    try:
+        return json.loads(subprocess.check_output(cmd, timeout=2, stderr=subprocess.DEVNULL))
+    except Exception:
+        return None
+
+workspaces = run(["niri", "msg", "-j", "workspaces"])
+windows    = run(["niri", "msg", "-j", "windows"])
+
+if not workspaces:
+    print(json.dumps({"text": "󰋸", "tooltip": "niri not running", "class": "ws-info"}))
+    sys.exit(0)
+
+# Map workspace_id → list of window titles
+ws_wins = {}
+for w in (windows or []):
+    ws_wins.setdefault(w.get("workspace_id"), []).append(
+        w.get("title") or w.get("app_id") or "?"
+    )
+
+lines = []
+for ws in sorted(workspaces, key=lambda x: x["idx"]):
+    wins  = ws_wins.get(ws["id"], [])
+    dot   = "●" if ws.get("is_focused") else ("◉" if wins else "○")
+    label = ", ".join(wins[:5]) + ("…" if len(wins) > 5 else "") if wins else "empty"
+    lines.append(f"{dot} WS {ws['idx']}: {label}")
+
+print(json.dumps({
+    "text":    "󰋸",
+    "tooltip": "\n".join(lines),
+    "class":   "ws-info"
+}))
