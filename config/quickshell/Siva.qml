@@ -53,54 +53,61 @@ PanelWindow {
     WlrLayershell.keyboardFocus: shown ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
 
     function send(obj) {
-        if (sock.connected)
-            sock.write(JSON.stringify(obj) + "\n")
+        const s = sockLoader.item
+        if (s && s.connected)
+            s.write(JSON.stringify(obj) + "\n")
     }
 
     // ── daemon link ───────────────────────────────────────────────────
-    // Socket.connected is the *desired* state, not the actual link, so
-    // liveness comes from daemon pings: no ping for 8s => force reconnect.
+    // Socket.connected is the *desired* state, not the actual link, and a
+    // Socket never re-dials once its connection dies — the only reliable
+    // reconnect is destroying and recreating the Socket (Loader bounce).
+    // Liveness comes from daemon pings: no ping for 8s => link is down.
     property bool linkUp: false
 
-    Socket {
-        id: sock
-        path: "/tmp/siva.sock"
-        connected: true
+    Component {
+        id: sockComp
+        Socket {
+            path: "/tmp/siva.sock"
+            connected: true
 
-        parser: SplitParser {
-            onRead: line => {
-                root.linkUp = true
-                watchdog.restart()
-                let m
-                try { m = JSON.parse(line) } catch (e) { return }
-                switch (m.type) {
-                case "show":        root.shown = true; break
-                case "hide":        root.shown = false; break
-                case "status":
-                    root.sivaState = m.value
-                    if (m.value !== "idle") root.shown = true
-                    break
-                case "mic":         root.micDevice = m.device; break
-                case "transcript":  root.transcript = m.text; break
-                case "cot":         root.cotText += m.text; break
-                case "cot_clear":   root.cotText = ""; break
-                case "tool":        root.cotText += "\n⚙ " + m.text + "\n"; break
-                case "reply":       root.replyText += m.text; break
-                case "reply_clear": root.replyText = ""; break
-                case "error":       root.cotText += "\n✖ " + m.text + "\n"; break
+            parser: SplitParser {
+                onRead: line => {
+                    root.linkUp = true
+                    watchdog.restart()
+                    let m
+                    try { m = JSON.parse(line) } catch (e) { return }
+                    switch (m.type) {
+                    case "show":        root.shown = true; break
+                    case "hide":        root.shown = false; break
+                    case "status":
+                        root.sivaState = m.value
+                        if (m.value !== "idle") root.shown = true
+                        break
+                    case "mic":         root.micDevice = m.device; break
+                    case "transcript":  root.transcript = m.text; break
+                    case "cot":         root.cotText += m.text; break
+                    case "cot_clear":   root.cotText = ""; break
+                    case "tool":        root.cotText += "\n⚙ " + m.text + "\n"; break
+                    case "reply":       root.replyText += m.text; break
+                    case "reply_clear": root.replyText = ""; break
+                    case "error":       root.cotText += "\n✖ " + m.text + "\n"; break
+                    }
                 }
             }
         }
     }
+    Loader { id: sockLoader; active: true; sourceComponent: sockComp }
+
     Timer {
         id: watchdog
         interval: 8000
         onTriggered: root.linkUp = false
     }
-    // reconnect while the daemon link is down
+    // rebuild the socket while the daemon link is down
     Timer {
         interval: 2000; running: !root.linkUp; repeat: true
-        onTriggered: { sock.connected = false; sock.connected = true }
+        onTriggered: { sockLoader.active = false; sockLoader.active = true }
     }
 
     // waveform animation timers (only while listening)
