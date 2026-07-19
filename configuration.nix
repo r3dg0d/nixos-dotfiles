@@ -1,5 +1,22 @@
 { config, lib, pkgs, ... }:
 
+let
+  # Custom SDDM theme: animated ASCII rain over an ASCII city (see ./sddm-ascii-city).
+  # The avatar is grayscaled at build time to match the monochrome look.
+  sddm-ascii-city = pkgs.stdenvNoCC.mkDerivation {
+    pname = "sddm-ascii-city";
+    version = "1.0";
+    src = ./sddm-ascii-city;
+    nativeBuildInputs = [ pkgs.imagemagick ];
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out/share/sddm/themes/ascii-city
+      cp -r --no-preserve=mode . $out/share/sddm/themes/ascii-city/
+      magick $src/pfp.png -colorspace Gray $out/share/sddm/themes/ascii-city/pfp.png
+      runHook postInstall
+    '';
+  };
+in
 {
   imports =
     [ # Include the results of the hardware scan.
@@ -50,6 +67,7 @@
   services.displayManager.sddm = {
     enable = true;
     wayland.enable = true;
+    theme = "ascii-city"; # found via sddm-ascii-city in systemPackages
   };
 
   # NVIDIA proprietary driver (RTX 4090). Required for NVENC in OBS and
@@ -269,6 +287,7 @@
   };
 
    environment.systemPackages = with pkgs; [
+     sddm-ascii-city # custom sddm theme (defined in the let-block above)
      vim # Do not forget to add an editor to edit configuration.nix! The Nano editor is also installed by default.
      wget
      git
@@ -301,6 +320,7 @@
      easyeffects # PipeWire effects GUI
      lsp-plugins # LV2 plugins (expander for the deep eboy voice chain)
      ollama-cuda
+     (llama-cpp.override { cudaSupport = true; })
      waybar
      swaybg
      simplex-chat-desktop

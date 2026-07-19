@@ -142,10 +142,6 @@ in
       size = 24;
     };
 
-    xdg.configFile."qtile" = {
-      source = create_symlink "${dotfiles}/qtile/";
-      recursive = true;
-    };
     xdg.configFile."nvim" = {
       source = create_symlink "${dotfiles}/nvim/";
       recursive = true;

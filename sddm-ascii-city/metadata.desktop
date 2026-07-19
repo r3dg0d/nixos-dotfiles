@@ -1,0 +1,11 @@
+[SddmGreeterTheme]
+Name=ASCII City
+Description=Black & white animated ASCII rain over an ASCII city
+Author=r3dg0d
+License=MIT
+Type=sddm-theme
+Version=1.0
+MainScript=Main.qml
+Theme-Id=ascii-city
+Theme-API=2.0
+QtVersion=6
