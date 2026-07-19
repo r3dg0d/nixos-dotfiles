@@ -1,152 +1,90 @@
-/* Invincible Theme — Waybar */
+/* Waybar — OLED black, white text, neon-green glowing accents */
 
 * {
-    border: none;
-    border-radius: 0;
-    font-family: "JetBrains Mono Nerd Font", "Symbols Nerd Font", "Inter", monospace;
-    font-size: 13px;
-    font-weight: 500;
-    min-height: 0;
-    padding: 0;
-    margin: 0;
+  font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", monospace;
+  font-size: 13px;
+  font-weight: bold;
+  min-height: 0;
 }
 
 window#waybar {
-    background: rgba(0, 0, 0, 0.92);
-    border: 2px solid #fcba03;
-    border-radius: 100px;
-    color: #ffffff;
-    transition: all 0.3s ease;
+  background: transparent;
+  color: #ffffff;
 }
 
-/* ── Workspaces ────────────────────────────────── */
-#workspaces {
-    padding: 0 10px;
+/* the bar body — pure black with a subtle green glow ring */
+.modules-left,
+.modules-center,
+.modules-right {
+  background: #000000;
+  border: 1px solid #00ff41;
+  border-radius: 10px;
+  padding: 0 6px;
+  margin: 2px 0;
+  box-shadow: 0 0 6px #00ff41;
 }
 
 #workspaces button {
-    color: #334488;
-    background: transparent;
-    border-radius: 100px;
-    padding: 4px 7px;
-    font-size: 11px;
-    transition: all 0.2s ease;
-    min-width: 0;
+  color: #555555;
+  background: transparent;
+  padding: 0 8px;
+  border-radius: 8px;
 }
 
 #workspaces button.active {
-    color: #fcba03;
-    background: rgba(252, 186, 3, 0.12);
-    padding: 4px 9px;
+  color: #000000;
+  background: #00ff41;
+  box-shadow: 0 0 8px #00ff41;
 }
 
 #workspaces button.urgent {
-    color: #ff2020;
-    background: rgba(255, 32, 32, 0.12);
+  color: #000000;
+  background: #ff2b2b;
 }
 
 #workspaces button:hover {
-    color: #ffffff;
-    background: rgba(255, 255, 255, 0.08);
+  color: #00ff41;
+  background: #0a0a0a;
 }
 
-/* ── Workspace info (󰋸 hover tooltip) ────────── */
-#custom-ws-info {
-    color: #444466;
-    padding: 0 6px 0 2px;
-    font-size: 14px;
-    transition: color 0.2s ease;
+#window {
+  color: #ffffff;
+  padding: 0 10px;
 }
 
-#custom-ws-info:hover {
-    color: #0026ff;
-}
-
-/* ── Clock ─────────────────────────────────────── */
 #clock {
-    color: #ffffff;
-    font-weight: 600;
-    padding: 0 16px;
-    letter-spacing: 0.5px;
+  color: #00ff41;
+  padding: 0 12px;
+  text-shadow: 0 0 6px #00ff41;
 }
 
-/* ── Weather ───────────────────────────────────── */
-#custom-weather {
-    color: #aaaaaa;
-    padding: 0 10px;
-    transition: color 0.2s ease;
-}
-
-#custom-weather:hover {
-    color: #ffffff;
-}
-
-/* ── Temperature ───────────────────────────────── */
-#temperature {
-    color: #aaaaaa;
-    padding: 0 8px;
-    transition: color 0.2s ease;
-}
-
-#temperature.critical {
-    color: #ff2020;
-}
-
-/* ── Right modules shared ──────────────────────── */
 #cpu,
 #memory,
-#wireplumber,
+#battery,
 #network,
+#pulseaudio,
+#temperature,
+#custom-weather,
 #tray {
-    color: #aaaaaa;
-    padding: 0 10px;
-    transition: color 0.2s ease;
+  padding: 0 10px;
+  color: #ffffff;
 }
 
-#cpu:hover,
-#memory:hover,
-#wireplumber:hover,
-#network:hover,
-#temperature:hover {
-    color: #ffffff;
-}
+#cpu       { color: #00ff41; }
+#memory    { color: #39ff14; }
+#network   { color: #ffffff; }
+#pulseaudio { color: #00ff41; }
+#temperature { color: #39ff14; }
+#temperature.critical { color: #ff2b2b; text-shadow: 0 0 6px #ff2b2b; }
+#custom-weather { color: #ffffff; }
 
-/* ── CPU ───────────────────────────────────────── */
-#cpu.warning  { color: #fcba03; }
-#cpu.critical { color: #ff2020; }
+#battery.warning  { color: #f5f543; }
+#battery.critical { color: #ff2b2b; text-shadow: 0 0 6px #ff2b2b; }
+#battery.charging { color: #00ff41; }
 
-/* ── Memory ────────────────────────────────────── */
-#memory.warning  { color: #fcba03; }
-#memory.critical { color: #ff2020; }
-
-/* ── Volume ────────────────────────────────────── */
-#wireplumber.muted { color: #444444; }
-
-/* ── Network ───────────────────────────────────── */
-#network.disconnected { color: #444444; }
-
-/* ── Tray ──────────────────────────────────────── */
-#tray { padding: 0 10px 0 4px; }
-#tray > .passive         { -gtk-icon-effect: dim; }
-#tray > .needs-attention { -gtk-icon-effect: highlight; color: #fcba03; }
-
-/* ── Sysinfo button ────────────────────────────── */
-#custom-sysinfo {
-    color: #888888;
-    padding: 0 14px 0 10px;
-    font-size: 12px;
-    transition: color 0.2s ease;
-}
-
-#custom-sysinfo:hover { color: #fcba03; }
-
-/* ── Tooltip ───────────────────────────────────── */
 tooltip {
-    background: #000000;
-    border: 1px solid #fcba03;
-    border-radius: 8px;
-    color: #ffffff;
-    font-size: 12px;
+  background: #000000;
+  border: 1px solid #00ff41;
+  border-radius: 8px;
+  color: #ffffff;
 }
-
-tooltip label { padding: 4px 8px; }

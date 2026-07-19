@@ -1,0 +1,99 @@
+/* Rofi — OLED black / neon-green glowing accents */
+
+configuration {
+    modi:                        "drun,run,window";
+    show-icons:                  true;
+    drun-display-format:         "{name}";
+    display-drun:                " apps";
+    display-run:                 " run";
+    display-window:              " win";
+    font:                        "JetBrainsMono Nerd Font 13";
+}
+
+* {
+    bg:        #000000;
+    bg-alt:    #0a0a0a;
+    fg:        #ffffff;
+    accent:    #00ff41;
+    urgent:    #ff2b2b;
+    border-c:  #00ff41;
+    transparent: rgba(0,0,0,0);
+}
+
+window {
+    transparency:     "real";
+    location:         center;
+    anchor:           center;
+    width:            620px;
+    border:           2px;
+    border-color:     @border-c;
+    border-radius:    12px;
+    background-color: @bg;
+    padding:          0px;
+}
+
+mainbox {
+    background-color: @bg;
+    children:         [ inputbar, listview ];
+    padding:          10px;
+    spacing:          10px;
+}
+
+inputbar {
+    background-color: @bg-alt;
+    text-color:       @accent;
+    border:           1px;
+    border-color:     @accent;
+    border-radius:    10px;
+    padding:          10px 14px;
+    children:         [ prompt, entry ];
+    spacing:          10px;
+}
+
+prompt {
+    text-color:       @accent;
+}
+
+entry {
+    text-color:       @fg;
+    placeholder:      "search…";
+    placeholder-color: #555555;
+}
+
+listview {
+    background-color: @transparent;
+    columns:          1;
+    lines:            8;
+    fixed-height:     false;
+    scrollbar:        false;
+    spacing:          4px;
+}
+
+element {
+    background-color: @transparent;
+    text-color:       @fg;
+    padding:          8px 12px;
+    border-radius:    8px;
+    spacing:          10px;
+}
+
+element selected {
+    background-color: @accent;
+    text-color:       @bg;
+}
+
+element normal urgent,
+element alternate urgent {
+    text-color:       @urgent;
+}
+
+element-icon {
+    size:             1.2em;
+    background-color: @transparent;
+}
+
+element-text {
+    background-color: @transparent;
+    text-color:       inherit;
+    vertical-align:   0.5;
+}

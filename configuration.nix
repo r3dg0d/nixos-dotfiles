@@ -1,0 +1,366 @@
+{ config, lib, pkgs, ... }:
+
+{
+  imports =
+    [ # Include the results of the hardware scan.
+      ./hardware-configuration.nix
+    ];
+
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+
+  # Use latest kernel.
+  boot.kernelPackages = pkgs.linuxPackages_latest;
+
+  networking.hostName = "nixos-btw"; # Define your hostname.
+
+  # Ad-blocking encrypted Mullvad DNS
+  services.resolved = {
+	enable = true;
+
+	settings.Resolve = {
+	  DNSSEC = "false";
+	  DNSOverTLS = "yes";
+	  Domains = "~.";
+
+	  # Mullvad's Extended Ad/Tracker/Malware/Social blocking servers
+	  FallbackDNS = [
+		"192.242.2.5#extended.dns.mullvad.net"
+		"2a07:e340::5#extended.dns.mullvad.net"
+	  ];
+	};
+  };
+
+  # Prevent NetworkManager from overriding the resolved settings
+  networking.networkmanager.dns = "systemd-resolved";  
+
+  # Configure network connections interactively with nmcli or nmtui.
+  networking.networkmanager.enable = true;
+
+  networking.firewall.allowedTCPPorts = [ 34785 53317 ]; # 53317: LocalSend
+  networking.firewall.allowedUDPPorts = [ 53317 ]; # LocalSend discovery
+
+  time.timeZone = "America/Los_Angeles";
+
+  services.xserver = {
+    enable = true;
+    autoRepeatDelay = 200;
+    autoRepeatInterval = 35;
+  };
+  services.displayManager.sddm = {
+    enable = true;
+    wayland.enable = true;
+  };
+
+  # NVIDIA proprietary driver (RTX 4090). Required for NVENC in OBS and
+  # for the CUDA stack (ollama-cuda); nouveau has neither.
+  services.xserver.videoDrivers = [ "nvidia" ];
+  hardware.graphics.enable = true;
+  hardware.nvidia = {
+    modesetting.enable = true; # required for Wayland (niri)
+    open = true;               # open kernel module, recommended for RTX 40-series
+    nvidiaSettings = true;
+  };
+
+  # Wayland / Niri
+  programs.niri.enable = true;
+  security.polkit.enable = true;
+
+  xdg.portal = {
+    enable = true;
+    extraPortals = [ pkgs.xdg-desktop-portal-gtk ];
+    config.common.default = "*";
+  };
+
+  environment.sessionVariables = {
+    NIXOS_OZONE_WL = "1";
+    MOZ_ENABLE_WAYLAND = "1";
+  };
+  
+  nixpkgs.config.allowUnfree = true;
+
+  # ratty 0.3.0 built arboard without its Wayland backend, so copy/paste
+  # silently failed under niri (no X11 DISPLAY to fall back to). Fixed
+  # upstream in v0.4.0; pin v0.5.0 until nixpkgs catches up.
+  nixpkgs.overlays = [
+    (final: prev: {
+      ratty = prev.ratty.overrideAttrs (old: rec {
+        version = "0.5.0";
+        src = final.fetchFromGitHub {
+          owner = "orhun";
+          repo = "ratty";
+          tag = "v${version}";
+          hash = "sha256-gQ9qeR9IyPUCy4V2ynnnXeN15Fs7aNDEwjQ+33gonRU=";
+        };
+        cargoDeps = final.rustPlatform.fetchCargoVendor {
+          inherit src;
+          name = "ratty-${version}-vendor";
+          hash = "sha256-mSb7QCYQ4EL76S7wmSdHBkjE5wzbVK8ln6oPdAv5BuA=";
+        };
+      });
+
+      # Lokinet: nixpkgs marks the package broken because its pinned release
+      # doesn't compile against nixpkgs' newer system spdlog/fmt. Upstream's
+      # intended from-source build uses the bundled oxen-logging submodules
+      # instead, so build it that way.
+      lokinet = prev.lokinet.overrideAttrs (old: {
+        buildInputs = final.lib.filter (p: (p.pname or "") != "spdlog") old.buildInputs;
+        cmakeFlags = old.cmakeFlags ++ [ "-DOXEN_LOGGING_FORCE_SUBMODULES=ON" ];
+        postInstall = (old.postInstall or "") + ''
+          # cmake links lokinet against the bundled spdlog but doesn't install it
+          find . -name 'libspdlog.so*' -exec cp -av {} $out/lib/ \;
+          patchelf --set-rpath "$out/lib" $out/lib/libspdlog.so.*.*.*
+          # services.lokinet expects the mainnet bootstrap inside the package
+          install -Dm644 ${final.fetchurl {
+            url = "https://seed.lokinet.org/lokinet.signed";
+            hash = "sha256-0SegVsdpGE3WQ8PbsDiO7tQLviYdCU3Eihd49yt8Lws=";
+          }} $out/share/bootstrap.signed
+        '';
+        meta = old.meta // { broken = false; };
+      });
+    })
+  ];
+
+
+  # Enable CUPS to print documents.
+  # services.printing.enable = true;
+
+  # Enable sound.
+  # services.pulseaudio.enable = true;
+  # OR
+  services.pipewire = {
+     enable = true;
+     pulse.enable = true;
+   };
+
+  # "Deep eboy voice." — virtual mic: Scarlett 2i2 input 1 -> downward
+  # expander (LSP, the ATKExpander role) -> low-shelf boost / high-shelf
+  # cut (biquads, the BasiQ role) -> slight gain. Select it as the mic in
+  # Discord/OBS/etc.
+  services.pipewire.extraConfig.pipewire."99-deep-eboy-voice" = {
+    "context.modules" = [
+      {
+        name = "libpipewire-module-filter-chain";
+        args = {
+          "node.description" = "Deep eboy voice.";
+          "media.name" = "Deep eboy voice.";
+          "filter.graph" = {
+            nodes = [
+              {
+                type = "lv2";
+                name = "expander";
+                plugin = "http://lsp-plug.in/plugins/lv2/expander_mono";
+                control = {
+                  em = 0.0;    # downward mode (gate room noise)
+                  al = 0.0631; # threshold ~ -24 dB
+                  er = 3.0;    # 1:3 ratio below threshold
+                };
+              }
+              {
+                type = "builtin";
+                name = "bass";
+                label = "bq_lowshelf";
+                control = { Freq = 130.0; Q = 0.7; Gain = 4.5; };
+              }
+              {
+                type = "builtin";
+                name = "treble";
+                label = "bq_highshelf";
+                control = { Freq = 9000.0; Q = 0.7; Gain = -2.0; };
+              }
+              {
+                type = "builtin";
+                name = "gain";
+                label = "linear";
+                control = { Mult = 1.25; }; # ~ +2 dB
+              }
+            ];
+            links = [
+              { output = "expander:out"; input = "bass:In"; }
+              { output = "bass:Out"; input = "treble:In"; }
+              { output = "treble:Out"; input = "gain:In"; }
+            ];
+            inputs = [ "expander:in" ];
+            outputs = [ "gain:Out" ];
+          };
+          "capture.props" = {
+            "node.name" = "capture.deep_eboy_voice";
+            "node.passive" = true;
+            "target.object" = "alsa_input.usb-Focusrite_Scarlett_2i2_USB_Y88R3D723DDED0-00.HiFi__Mic1__source";
+            "audio.channels" = 1;
+            "audio.position" = [ "MONO" ];
+            "stream.dont-remix" = true;
+          };
+          "playback.props" = {
+            "node.name" = "deep_eboy_voice";
+            "media.class" = "Audio/Source";
+            "audio.channels" = 1;
+            "audio.position" = [ "MONO" ];
+          };
+        };
+      }
+    ];
+  };
+
+  # let the pipewire daemon find the LSP LV2 plugins for the filter-chain
+  services.pipewire.extraLv2Packages = [ pkgs.lsp-plugins ];
+
+  # Enable touchpad support (enabled default in most desktopManager).
+  # services.libinput.enable = true;
+
+  # Define a user account. Don't forget to set a password with ‘passwd’.
+  users.users.r3dg0d = {
+    isNormalUser = true;
+    linger = true;  # start user services (mpd) at boot, not just on login
+    extraGroups = [ "wheel" ]; # Enable ‘sudo’ for the user.
+    shell = pkgs.zsh;          # zsh as the login shell
+    packages = with pkgs; [
+      tree
+    ];
+  };
+
+  programs.firefox.enable = true;
+
+  # zsh must be enabled system-wide to be a valid login shell
+  programs.zsh.enable = true;
+
+  # gvfs = trash / mounting / network shares for Nautilus
+  services.gvfs.enable = true;
+
+  # Flatpak (installs the flatpak pkg + sets up the service; portals already enabled above)
+  services.flatpak.enable = true;
+
+  # Mullvad VPN daemon (the mullvad-vpn package is the GUI/CLI; this runs the daemon)
+  services.mullvad-vpn.enable = true;
+
+  # SearXNG metasearch, localhost-only. Secret lives in /etc/searxng.env
+  # (not in the repo / nix store); @SEARXNG_SECRET@ is substituted from it.
+  services.searx = {
+    enable = true;
+    environmentFile = "/etc/searxng.env";
+    settings = {
+      server = {
+        bind_address = "127.0.0.1";
+        port = 8888;
+        secret_key = "@SEARXNG_SECRET@";
+      };
+      # feeds the omnibox suggest URL below
+      search.autocomplete = "duckduckgo";
+    };
+  };
+
+  # Managed policy read by ungoogled-chromium from /etc/chromium/policies:
+  # makes the local SearXNG the default (omnibox) search engine.
+  programs.chromium = {
+    enable = true;
+    defaultSearchProviderEnabled = true;
+    defaultSearchProviderSearchURL = "http://localhost:8888/search?q={searchTerms}";
+    defaultSearchProviderSuggestURL = "http://localhost:8888/autocompleter?q={searchTerms}";
+    extraOpts.DefaultSearchProviderName = "SearXNG";
+  };
+
+  # Screen recording on niri via the wlr-screencopy protocol.
+  programs.obs-studio = {
+    enable = true;
+    # cudaSupport builds OBS against the NVIDIA stack so the NVENC
+    # encoders show up (https://nixos.wiki/wiki/OBS_Studio)
+    package = pkgs.obs-studio.override { cudaSupport = true; };
+    plugins = with pkgs.obs-studio-plugins; [ wlrobs ];
+  };
+
+   environment.systemPackages = with pkgs; [
+     vim # Do not forget to add an editor to edit configuration.nix! The Nano editor is also installed by default.
+     wget
+     git
+     thunderbird # Gmail replacement
+     etesync-dav # Degoogled calendar
+     immich # Photos
+     libretranslate # Google Translate replacement
+     onlyoffice-desktopeditors # Google Docs replacement
+     obsidian
+     ratty
+     claude-code
+     alacritty
+     monero-gui
+     monero-cli
+     
+     bibata-cursors
+     qbittorrent
+     tor-browser
+     mullvad-vpn
+     rofi
+     localsend
+     docker
+     freetube
+     prismlauncher
+     sqlmap # Cybersecurity tools (SQLi tool)
+     smap # Nmap fork that uses shodan.io
+     hashcat
+     mpd # Music Player Daemon
+     rmpc # Music player TUI
+     easyeffects # PipeWire effects GUI
+     lsp-plugins # LV2 plugins (expander for the deep eboy voice chain)
+     ollama-cuda
+     waybar
+     swaybg
+     simplex-chat-desktop
+     xwayland-satellite # X11 apps under niri (JVM apps like simplex-chat-desktop need XWayland)
+     mako
+     nautilus
+     emojipick
+     quickshell
+     cliphist
+     mpv
+     file-roller
+     gh
+     grim
+     slurp
+     ungoogled-chromium
+     keepassxc
+     coyim
+     irssi
+     yt-dlp
+     ffmpeg
+     gnupg
+     tor
+   ];
+
+  # Runs the daemon with CAP_NET_ADMIN/CAP_NET_BIND_SERVICE and puts the
+  # lokinet CLI in systemPackages. DNS for .loki lives on 127.3.2.1.
+  services.lokinet.enable = true;
+
+  # Route .loki/.snode lookups to lokinet's DNS so they resolve system-wide
+  # (browsers included). Lokinet tries to register this itself via
+  # SetLinkDNS but the hardened DynamicUser service can't talk to resolved,
+  # so do it from a privileged ("+") hook once lokitun0 exists. Per-link
+  # DoT/DNSSEC off: the global Mullvad settings would break plain DNS
+  # to 127.3.2.1, and the ~loki routing domain wins over global "~.".
+  systemd.services.lokinet.serviceConfig.ExecStartPost =
+    "+" + pkgs.writeShellScript "lokinet-register-dns" ''
+      for _ in $(seq 1 60); do
+        ${pkgs.systemd}/bin/resolvectl dns lokitun0 127.3.2.1 2>/dev/null && break
+        sleep 0.5
+      done
+      ${pkgs.systemd}/bin/resolvectl domain lokitun0 '~loki' '~snode'
+      ${pkgs.systemd}/bin/resolvectl dnsovertls lokitun0 no
+      ${pkgs.systemd}/bin/resolvectl dnssec lokitun0 no
+    '';
+
+  # gpg-agent + a pinentry so gpg can prompt for passphrases
+  # (fixes "no pinentry"). curses = prompts inside the terminal.
+  programs.gnupg.agent = {
+    enable = true;
+    pinentryPackage = pkgs.pinentry-curses;
+  };
+
+  fonts.packages = with pkgs; [
+	nerd-fonts.jetbrains-mono
+	nerd-fonts.symbols-only
+  ];
+
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+  system.stateVersion = "26.05";
+
+}
+

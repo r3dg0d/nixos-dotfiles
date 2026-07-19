@@ -1,0 +1,92 @@
+{
+  "layer": "top",
+  "position": "top",
+  "height": 34,
+  "spacing": 6,
+  "margin-top": 6,
+  "margin-left": 8,
+  "margin-right": 8,
+
+  "modules-left": ["niri/workspaces", "niri/window"],
+  "modules-center": ["clock"],
+  "modules-right": ["tray", "custom/weather", "temperature", "pulseaudio", "network", "cpu", "memory", "battery"],
+
+  // NOTE: nerd-font icons are written as \uXXXX escapes on purpose — keep
+  // them that way so they survive editors/tools that mangle PUA glyphs.
+  "niri/workspaces": {
+    "format": "{icon}",
+    "format-icons": {
+      "active": "",
+      "default": "",
+      "urgent": ""
+    },
+    "on-click": "activate"
+  },
+
+  "niri/window": {
+    "format": "{title}",
+    "max-length": 60,
+    "separate-outputs": true
+  },
+
+  "clock": {
+    "format": " {:%I:%M %p}",
+    "format-alt": " {:%a %d %b %Y}",
+    "tooltip-format": "<tt><small>{calendar}</small></tt>"
+  },
+
+  "cpu": {
+    "format": " {usage}%",
+    "interval": 2
+  },
+
+  "memory": {
+    "format": "󰍛 {percentage}%",
+    "interval": 5
+  },
+
+  "temperature": {
+    "thermal-zone": 0,
+    "interval": 2,
+    "critical-threshold": 90,
+    "format": "{icon} {temperatureC}°C",
+    "format-icons": ["", "", "", "", ""]
+  },
+
+  "custom/weather": {
+    "exec": "curl -s --max-time 5 'https://wttr.in/?format=%c%t' | tr -d ' '",
+    "interval": 900,
+    "format": "{}",
+    "tooltip": false,
+    "on-click": "xdg-open https://wttr.in"
+  },
+
+  "battery": {
+    "states": { "warning": 30, "critical": 15 },
+    "format": "{icon} {capacity}%",
+    "format-charging": " {capacity}%",
+    "format-plugged": " {capacity}%",
+    "format-icons": ["", "", "", "", ""]
+  },
+
+  "network": {
+    "format-wifi": " {signalStrength}%",
+    "format-ethernet": "󰈀 {ipaddr}",
+    "format-disconnected": " offline",
+    "tooltip-format": "{ifname} via {gwaddr}",
+    "tooltip-format-wifi": "{essid} ({signalStrength}%)"
+  },
+
+  "pulseaudio": {
+    "format": "{icon} {volume}%",
+    "format-muted": " muted",
+    "format-icons": { "default": ["", "", ""] },
+    "on-click": "ratty -T 'Audio Switcher' -e /etc/profiles/per-user/r3dg0d/bin/node /home/r3dg0d/nixos-dotfiles/config/scripts/audio-switcher/cli.js",
+    "on-click-right": "pavucontrol"
+  },
+
+  "tray": {
+    "icon-size": 16,
+    "spacing": 8
+  }
+}

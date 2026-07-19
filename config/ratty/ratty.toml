@@ -1,0 +1,68 @@
+# ratty — OLED black / red text / neon-green accents
+# Schema ref: https://github.com/orhun/ratty (config/ratty.toml)
+
+[window]
+width = 960
+height = 620
+scale_factor = 1.0
+opacity = 1.0          # true OLED black, no transparency
+
+[terminal]
+default_cols = 110
+default_rows = 34
+scrollback = 5000
+
+[env]
+TERM = "xterm-256color"
+
+[font]
+family = "JetBrainsMono Nerd Font"
+style = "Regular"
+size = 16
+
+# 3D cursor model disabled — ratty falls back to a regular terminal cursor.
+# To bring it back: set visible = true and give a path (e.g.
+# "/home/r3dg0d/3D Models/PeepoCozy.obj" or models/teapot.obj).
+[cursor.model]
+visible = false
+
+[bindings]
+keys = [
+  { key = "C", with = "Control | Shift", action = "Copy" },
+  { key = "V", with = "Control | Shift", action = "Paste" },
+  { key = "PageUp", with = "Shift", action = "ScrollPageUp" },
+  { key = "PageDown", with = "Shift", action = "ScrollPageDown" },
+  { key = "Up", with = "Shift", action = "ScrollUp" },
+  { key = "Down", with = "Shift", action = "ScrollDown" },
+  { key = "Equal", with = "Control", action = "IncreaseFontSize" },
+  { key = "Minus", with = "Control", action = "DecreaseFontSize" },
+  { key = "Digit0", with = "Control", action = "ResetFontSize" },
+  { key = "Enter", with = "Control | alt", action = "Toggle3DMode" },
+  { key = "M", with = "Control | alt", action = "ToggleMobiusMode" },
+]
+
+# --- Theme: OLED black background, red foreground, neon-green cursor ---
+[theme]
+foreground = "#ff2b2b"     # red terminal text (as requested)
+background = "#000000"     # OLED pure black
+cursor     = "#00ff41"     # neon-green glowing accent
+
+[theme.normal]
+black   = "#000000"
+red     = "#ff2b2b"
+green   = "#00ff41"
+yellow  = "#e5e510"
+blue    = "#2472c8"
+magenta = "#bc3fbc"
+cyan    = "#11a8cd"
+white   = "#c8c8c8"
+
+[theme.bright]
+black   = "#3a3a3a"
+red     = "#ff5c5c"
+green   = "#39ff14"
+yellow  = "#f5f543"
+blue    = "#3b8eea"
+magenta = "#d670d6"
+cyan    = "#29b8db"
+white   = "#ffffff"

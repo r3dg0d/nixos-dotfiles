@@ -1,0 +1,6 @@
+[submodule "config/nvim"]
+	path = config/nvim
+	url = https://github.com/tonybanters/nvim
+[submodule "config/qtile"]
+	path = config/qtile
+	url = https://github.com/tonybanters/qtile

@@ -1,2 +1,0 @@
-#!/usr/bin/env bash
-exec node /home/r3dg0d/.local/share/audio-manager/bundle.mjs
