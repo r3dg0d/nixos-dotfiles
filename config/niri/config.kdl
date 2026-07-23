@@ -72,6 +72,12 @@ spawn-at-startup "wl-paste" "--watch" "cliphist" "store"
 spawn-at-startup "qs"
 spawn-at-startup "swaybg" "-m" "fill" "-i" "/home/r3dg0d/Pictures/Wallpaper/wallpaper.jpg"
 
+// SIVA voice assistant stack (F7 voicefetch, F8 assistant, F9 dictation)
+// siva-llm runs as a systemd user service (Restart=on-failure) — see home.nix
+spawn-at-startup "/home/r3dg0d/.local/bin/siva-daemon"
+spawn-at-startup "/home/r3dg0d/.local/bin/siva-voicefetch-daemon"
+spawn-at-startup "/home/r3dg0d/.local/bin/siva-type-daemon"
+
 prefer-no-csd
 
 cursor {
@@ -107,6 +113,17 @@ binds {
 
     // Quickshell clipboard manager (center-column moved to Mod+Shift+C)
     Mod+C { spawn "qs" "ipc" "call" "clipboard" "toggle"; }
+
+    // SIVA voice assistant stack
+    F7 repeat=false hotkey-overlay-title="SIVA Voicefetch: voice models (toggle)" {
+        spawn "/home/r3dg0d/.local/bin/siva-voicefetch";
+    }
+    F8 repeat=false hotkey-overlay-title="SIVA: voice assistant (push-to-talk toggle)" {
+        spawn "/home/r3dg0d/.local/bin/siva";
+    }
+    F9 repeat=false hotkey-overlay-title="SIVA-Type: AI dictation (toggle)" {
+        spawn "/home/r3dg0d/.local/bin/siva-type";
+    }
 
     // Focus movement
     Mod+H { focus-column-left; }

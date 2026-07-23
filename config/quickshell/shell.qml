@@ -10,6 +10,13 @@ import Quickshell.Io
 ShellRoot {
     id: root
 
+    // SIVA voice assistant overlays (F8 assistant, F7 voicefetch, F9 dictation)
+    Siva {}
+    SivaVoicefetch {}
+    SivaType {}
+    SivaEnroll {}
+    Stream {}   // live dual-monitor feed shown while SIVA operates agentically
+
     property bool shown: false
     property var entries: []
     property string query: ""

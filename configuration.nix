@@ -74,6 +74,7 @@ in
   # for the CUDA stack (ollama-cuda); nouveau has neither.
   services.xserver.videoDrivers = [ "nvidia" ];
   hardware.graphics.enable = true;
+  hardware.graphics.enable32Bit = true; # required for 32-bit Steam games / Proton
   hardware.nvidia = {
     modesetting.enable = true; # required for Wayland (niri)
     open = true;               # open kernel module, recommended for RTX 40-series
@@ -81,8 +82,16 @@ in
   };
 
   # Wayland / Niri
+  programs.steam = {
+    enable = true;
+    remotePlay.openFirewall = true;
+  };
+
   programs.niri.enable = true;
   security.polkit.enable = true;
+
+  # SIVA voice assistant: uinput-level pointer control on Wayland
+  programs.ydotool.enable = true;
 
   xdg.portal = {
     enable = true;
@@ -230,7 +239,7 @@ in
   users.users.r3dg0d = {
     isNormalUser = true;
     linger = true;  # start user services (mpd) at boot, not just on login
-    extraGroups = [ "wheel" ]; # Enable ‘sudo’ for the user.
+    extraGroups = [ "wheel" "ydotool" ]; # sudo + SIVA's ydotoold socket
     shell = pkgs.zsh;          # zsh as the login shell
     packages = with pkgs; [
       tree
@@ -283,7 +292,12 @@ in
     # cudaSupport builds OBS against the NVIDIA stack so the NVENC
     # encoders show up (https://nixos.wiki/wiki/OBS_Studio)
     package = pkgs.obs-studio.override { cudaSupport = true; };
-    plugins = with pkgs.obs-studio-plugins; [ wlrobs ];
+    plugins = with pkgs.obs-studio-plugins; [
+      wlrobs
+      obs-3d-effect
+      obs-advanced-masks
+      obs-stroke-glow-shadow
+    ];
   };
 
    environment.systemPackages = with pkgs; [
@@ -299,17 +313,22 @@ in
      obsidian
      ratty
      claude-code
+     opencode
      alacritty
      monero-gui
      monero-cli
-     
+     vscodium     
      bibata-cursors
      qbittorrent
+     antigravity
      tor-browser
      mullvad-vpn
      rofi
      localsend
      docker
+     wireshark
+     wireshark-cli
+     termshark
      freetube
      prismlauncher
      sqlmap # Cybersecurity tools (SQLi tool)
@@ -321,6 +340,12 @@ in
      lsp-plugins # LV2 plugins (expander for the deep eboy voice chain)
      ollama-cuda
      (llama-cpp.override { cudaSupport = true; })
+     whisper-cpp # SIVA STT
+     wtype # SIVA virtual keyboard
+     piper-tts # SIVA voice output
+     sox # SIVA wake-word enrollment (beep synth + 16k resample)
+     socat # SIVA F7/F8/F9 toggle scripts talk to the daemon sockets
+     tesseract # SIVA agentic OCR click-by-text (find on-screen text to click)
      waybar
      swaybg
      simplex-chat-desktop
@@ -342,12 +367,22 @@ in
      yt-dlp
      ffmpeg
      gnupg
-     tor
+      tor
+
+       # MatrixRAT dependencies
+       # python3 carries the SIVA wake-word deps (numpy/scipy/sklearn/onnxruntime)
+       (python3.withPackages (ps: with ps; [ numpy scipy scikit-learn onnxruntime tqdm requests ]))
+       openssl
+       jq
+       figlet
+       toilet
+       lolcat
    ];
 
   # Runs the daemon with CAP_NET_ADMIN/CAP_NET_BIND_SERVICE and puts the
   # lokinet CLI in systemPackages. DNS for .loki lives on 127.3.2.1.
   services.lokinet.enable = true;
+  services.lokinet.settings.network.keyfile = "identity.key";
 
   # Route .loki/.snode lookups to lokinet's DNS so they resolve system-wide
   # (browsers included). Lokinet tries to register this itself via

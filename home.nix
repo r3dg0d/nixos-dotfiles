@@ -103,6 +103,28 @@ in
       TERMINAL = "ratty";
     };
 
+    # user-installed scripts (SIVA stack lives here)
+    home.sessionPath = [ "$HOME/.local/bin" ];
+
+    # SIVA's llama.cpp backend as a user service so a CUDA-OOM crash
+    # self-heals (Restart=on-failure) instead of leaving the assistant
+    # throwing ConnectionRefused until the next reboot. It only needs the
+    # GPU + localhost, no Wayland, so it can start with the user session.
+    systemd.user.services.siva-llm = {
+      Unit = {
+        Description = "SIVA LLM backend (llama.cpp, gemma-4-31B + vision)";
+        After = [ "graphical-session.target" ];
+      };
+      Service = {
+        ExecStart = "${config.home.homeDirectory}/.local/bin/siva-llm";
+        Restart = "on-failure";
+        RestartSec = 5;
+        # give a crashed CUDA context a moment to be reclaimed before retry
+        StartLimitIntervalSec = 0;
+      };
+      Install.WantedBy = [ "default.target" ];
+    };
+
     # mpd — indexes ~/Music recursively; rmpc connects to it on localhost:6600
     services.mpd = {
       enable = true;
