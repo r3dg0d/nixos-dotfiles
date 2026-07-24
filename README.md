@@ -16,6 +16,12 @@ Ricing, a local agentic voice assistant, degoogled daily drivers, gaming, video 
 
 A tiling niri session on dual 3440×1440 ultrawides: an ASCII-art wallpaper, a slim [waybar](https://github.com/Alexays/Waybar), and a [quickshell](https://quickshell.org/) layer for widgets and overlays. Everything is themed to the same OLED-black / white / neon-green (`#00ff41`) palette — down to the zsh syntax highlighting and the [starship](https://starship.rs/) prompt.
 
+## 🖼️ `fetch` — animated 3D system info
+
+![fetch](assets/fetch.png)
+
+The terminal is [ratty](https://github.com/orhun/ratty) (GPU-rendered, with inline 3D graphics), running [areofyl/fetch](https://github.com/areofyl/fetch) — a neofetch-style tool that spins a **3D ASCII distro logo** next to the system info (i9-14900K, RTX 4090, niri on Wayland). Pulled in as the `areofyl-fetch` flake input.
+
 ## 🔐 SDDM login theme — `sddm-ascii-city`
 
 ![SDDM theme](assets/sddm.png)
