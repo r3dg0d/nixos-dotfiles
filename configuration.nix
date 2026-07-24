@@ -93,6 +93,15 @@ in
   # SIVA voice assistant: uinput-level pointer control on Wayland
   programs.ydotool.enable = true;
 
+  # SIVA durable memory (MemPalace): its onnxruntime/chromadb wheels are
+  # generic dynamically-linked binaries, so nix-ld lets them run on NixOS.
+  # Enables `uv tool install mempalace` (mempalace-mcp) to work.
+  programs.nix-ld.enable = true;
+  programs.nix-ld.libraries = with pkgs; [
+    stdenv.cc.cc   # libstdc++/libgcc for onnxruntime
+    zlib
+  ];
+
   xdg.portal = {
     enable = true;
     extraPortals = [ pkgs.xdg-desktop-portal-gtk ];
