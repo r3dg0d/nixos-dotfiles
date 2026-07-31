@@ -70,6 +70,53 @@ in
     theme = "ascii-city"; # found via sddm-ascii-city in systemPackages
   };
 
+  # Login-screen music. The QML greeter can't play audio (no PipeWire/PulseAudio
+  # exists for the pre-login `sddm` user, and Qt6 MediaPlayer has no ALSA
+  # fallback), so instead we play sddmmusic.ogg straight to the sound card via
+  # ALSA while the greeter is on screen, and stop the moment a session starts
+  # (before the user's PipeWire grabs the device). Runs as root so it can open
+  # the ALSA device without audio-group membership. Targets the Scarlett 2i2.
+  systemd.services.sddm-login-music = {
+    description = "Play login-screen music via ALSA while the SDDM greeter is shown";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "sound.target" ];
+    path = [ pkgs.procps pkgs.mpv ];
+    serviceConfig = {
+      Type = "simple";
+      Restart = "always";
+      RestartSec = 5;
+    };
+    script = ''
+      ogg=/run/current-system/sw/share/sddm/themes/ascii-city/sddmmusic.ogg
+      dev="alsa/plughw:CARD=USB,DEV=0"   # Focusrite Scarlett 2i2 (card id "USB")
+      mpvpid=""
+      cleanup() { [ -n "$mpvpid" ] && kill "$mpvpid" 2>/dev/null || true; }
+      trap cleanup EXIT
+      while true; do
+        # Match the greeter by process name (comm, truncated to 15 chars),
+        # not cmdline — `pgrep -f` false-matches anything mentioning the string.
+        if pgrep -x 'sddm-greeter-qt.?' >/dev/null 2>&1; then
+          # greeter is on screen — ensure music is playing
+          if [ -z "$mpvpid" ] || ! kill -0 "$mpvpid" 2>/dev/null; then
+            mpv --no-video --no-terminal --really-quiet \
+                --loop-file=inf --volume=60 \
+                --audio-device="$dev" "$ogg" &
+            mpvpid=$!
+          fi
+        else
+          # logged in (or no greeter) — stop music, free the device
+          if [ -n "$mpvpid" ] && kill -0 "$mpvpid" 2>/dev/null; then
+            kill "$mpvpid" 2>/dev/null || true
+          fi
+          mpvpid=""
+        fi
+        # 1s poll: on login the greeter exits first, and we must release the
+        # ALSA device before the user's PipeWire tries to claim it.
+        sleep 1
+      done
+    '';
+  };
+
   # NVIDIA proprietary driver (RTX 4090). Required for NVENC in OBS and
   # for the CUDA stack (ollama-cuda); nouveau has neither.
   services.xserver.videoDrivers = [ "nvidia" ];
@@ -266,6 +313,31 @@ in
   # Flatpak (installs the flatpak pkg + sets up the service; portals already enabled above)
   services.flatpak.enable = true;
 
+  # Jellyfin media server — stream movies/TV from this PC to the TV.
+  # openFirewall opens 8096 (web UI/API) + 8920 (HTTPS) TCP and UDP
+  # 1900/7359 for DLNA + client auto-discovery on the LAN. The service runs
+  # as its own `jellyfin` user; add it to the video/render groups so it can
+  # reach the RTX 4090's /dev/nvidia* + /dev/dri nodes for NVENC hardware
+  # transcoding (enable it under Dashboard > Playback once running).
+  services.jellyfin = {
+    enable = true;
+    openFirewall = true;
+  };
+  users.users.jellyfin.extraGroups = [ "video" "render" ];
+
+  # The media lives under ~/Videos, but /home/r3dg0d is mode 0700 so the
+  # jellyfin user can't traverse into it. A POSIX ACL grants it the traverse
+  # (+x) bit on the home dir only — the contents stay unreadable to everyone
+  # else. This has to live in tmpfiles rather than a one-off `setfacl`: the
+  # users activation snippet runs `chmod <homeMode> /home/r3dg0d` on *every*
+  # `nixos-rebuild switch`, and chmod recalculates the ACL mask from the group
+  # bits (0 here), silently reducing the named-user entry to `#effective:---`.
+  # The explicit `m::x` re-establishes the mask; systemd-tmpfiles-resetup runs
+  # after the activation scripts, so it undoes the damage each rebuild.
+  systemd.tmpfiles.rules = [
+    "a+ /home/r3dg0d - - - - u:jellyfin:x,m::x"
+  ];
+
   # Mullvad VPN daemon (the mullvad-vpn package is the GUI/CLI; this runs the daemon)
   services.mullvad-vpn.enable = true;
 
@@ -280,8 +352,13 @@ in
         port = 8888;
         secret_key = "@SEARXNG_SECRET@";
       };
-      # feeds the omnibox suggest URL below
-      search.autocomplete = "duckduckgo";
+      search = {
+        # feeds the omnibox suggest URL below
+        autocomplete = "duckduckgo";
+        # expose the JSON API too (default is html only) so SIVA's web_search
+        # tool can consume results programmatically — localhost-only anyway
+        formats = [ "html" "json" ];
+      };
     };
   };
 
@@ -320,6 +397,7 @@ in
      libretranslate # Google Translate replacement
      onlyoffice-desktopeditors # Google Docs replacement
      obsidian
+     (pkgs.callPackage ./davinci-resolve.nix { }) # video editor 21.0.3 — vendored from creatorkostas/davinci-resolve-nixos, version-bumped
      ratty
      claude-code
      opencode
@@ -329,8 +407,12 @@ in
      vscodium     
      bibata-cursors
      qbittorrent
+     pcsx2 # PlayStation 2 emulator
+     vesktop # Discord client (Vencord baked in)
      antigravity
      tor-browser
+     areofyl-fetch # animated 3D `fetch` tool (github:areofyl/fetch, via flake overlay)
+     tuiweb # TUI-only web browser: HTML/CSS/JS, images and video as characters (~/Projects/tuiweb, via flake overlay)
      mullvad-vpn
      rofi
      localsend
@@ -375,6 +457,7 @@ in
      irssi
      yt-dlp
      ffmpeg
+     jellyfin-media-player # Jellyfin desktop client (native player, for this PC)
      gnupg
       tor
 
@@ -421,6 +504,27 @@ in
 	nerd-fonts.jetbrains-mono
 	nerd-fonts.symbols-only
   ];
+
+  # Never suspend on its own. The Pulsar PCMK 2 HE keyboard's "System Control"
+  # HID interface (event9) spuriously emits KEY_POWER after a stretch of no
+  # input, and logind turned that into a suspend -- every single sleep in the
+  # journal is "Power key pressed short." followed by "The system will suspend
+  # now!", never an idle timeout. It fires again the moment the keyboard
+  # re-enumerates on resume, so the machine used to drop straight back to sleep.
+  # Suspend is now only reachable deliberately, via the quickshell power widget
+  # (`systemctl suspend`, see config/quickshell/Power.qml).
+  services.logind.settings.Login = {
+    HandlePowerKey = "ignore";            # the bogus event; short press does nothing
+    HandlePowerKeyLongPress = "poweroff"; # holding the real case button still works
+    HandleSuspendKey = "ignore";
+    HandleSuspendKeyLongPress = "ignore";
+    HandleHibernateKey = "ignore";
+    HandleHibernateKeyLongPress = "ignore";
+    HandleLidSwitch = "ignore";
+    HandleLidSwitchDocked = "ignore";
+    HandleLidSwitchExternalPower = "ignore";
+    IdleAction = "ignore";
+  };
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 

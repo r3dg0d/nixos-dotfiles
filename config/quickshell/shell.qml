@@ -16,6 +16,8 @@ ShellRoot {
     SivaType {}
     SivaEnroll {}
     Stream {}   // live dual-monitor feed shown while SIVA operates agentically
+    Wifi {}     // nmcli wifi picker; toggle via `qs ipc call wifi toggle` (waybar network click)
+    Power {}    // power menu (logout/restart/shutdown/sleep); `qs ipc call power toggle` (waybar power click)
 
     property bool shown: false
     property var entries: []

@@ -75,6 +75,9 @@ spawn-at-startup "swaybg" "-m" "fill" "-i" "/home/r3dg0d/Pictures/Wallpaper/wall
 // SIVA voice assistant stack (F7 voicefetch, F8 assistant, F9 dictation)
 // siva-llm runs as a systemd user service (Restart=on-failure) — see home.nix
 spawn-at-startup "/home/r3dg0d/.local/bin/siva-daemon"
+// always-on "Hey SIVA" wake word listener (two-stage: openWakeWord + whisper
+// confirmation). Waits politely until the verifier is trained (siva-enroll).
+spawn-at-startup "/home/r3dg0d/.local/bin/siva-wake"
 spawn-at-startup "/home/r3dg0d/.local/bin/siva-voicefetch-daemon"
 spawn-at-startup "/home/r3dg0d/.local/bin/siva-type-daemon"
 

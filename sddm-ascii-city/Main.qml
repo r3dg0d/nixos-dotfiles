@@ -1,6 +1,10 @@
 import QtQuick 2.15
 
 // ascii-city: black & white animated ASCII rain over a procedural ASCII city.
+// Login music is NOT played here: the greeter has no PipeWire/PulseAudio (it
+// runs as the pre-login `sddm` user), and Qt6 MediaPlayer has no ALSA fallback,
+// so it plays into a void. Instead sddmmusic.ogg is played straight to the
+// sound card by the `sddm-login-music` systemd service (see configuration.nix).
 Rectangle {
     id: root
     color: "#000000"

@@ -104,7 +104,7 @@ in
     };
 
     # user-installed scripts (SIVA stack lives here)
-    home.sessionPath = [ "$HOME/.local/bin" ];
+    home.sessionPath = [ "$HOME/.local/bin" "$HOME/Scripts" ];
 
     # SIVA's llama.cpp backend as a user service so a CUDA-OOM crash
     # self-heals (Restart=on-failure) instead of leaving the assistant
@@ -121,6 +121,41 @@ in
         RestartSec = 5;
         # give a crashed CUDA context a moment to be reclaimed before retry
         StartLimitIntervalSec = 0;
+      };
+      Install.WantedBy = [ "default.target" ];
+    };
+
+    # DaVinci Resolve and the SIVA LLM both want the 4090's VRAM, and Resolve
+    # OOMs when llama.cpp is holding gemma-4-31B. This watcher stops siva-llm
+    # while a `resolve` process is alive and restarts it once Resolve quits —
+    # but only if *it* stopped the service (so a manual stop stays stopped).
+    systemd.user.services.davinci-llm-pause = {
+      Unit = {
+        Description = "Pause SIVA LLM (free VRAM) while DaVinci Resolve runs";
+        After = [ "graphical-session.target" ];
+      };
+      Service = {
+        ExecStart = pkgs.writeShellScript "davinci-llm-pause" ''
+          set -u
+          pgrep="${pkgs.procps}/bin/pgrep"
+          systemctl="${pkgs.systemd}/bin/systemctl"
+          paused_by_us=0
+          while true; do
+            if "$pgrep" -x resolve >/dev/null 2>&1; then
+              if "$systemctl" --user is-active --quiet siva-llm.service; then
+                echo "DaVinci Resolve detected — stopping siva-llm to free VRAM"
+                "$systemctl" --user stop siva-llm.service && paused_by_us=1
+              fi
+            elif [ "$paused_by_us" = 1 ]; then
+              echo "DaVinci Resolve closed — restarting siva-llm"
+              "$systemctl" --user start siva-llm.service
+              paused_by_us=0
+            fi
+            sleep 5
+          done
+        '';
+        Restart = "always";
+        RestartSec = 10;
       };
       Install.WantedBy = [ "default.target" ];
     };
@@ -203,6 +238,17 @@ in
     xdg.configFile."fastfetch" = {
       source = create_symlink "${dotfiles}/fastfetch/";
       recursive = true;
+    };
+
+    # Hide these apps from the rofi drun launcher without uninstalling them.
+    # Each entry shadows the package-provided .desktop (matched by filename, so
+    # attr name/case must match) with NoDisplay=true. rmpc is a TUI kept for the
+    # mpd setup; alacritty/firefox/dualcpy are just decluttered from the menu.
+    xdg.desktopEntries = {
+      rmpc      = { name = "rmpc";      noDisplay = true; };
+      firefox   = { name = "firefox";   noDisplay = true; };
+      Alacritty = { name = "Alacritty"; noDisplay = true; };
+      dualcpy   = { name = "dualcpy";   noDisplay = true; };
     };
 
     home.packages = with pkgs; [

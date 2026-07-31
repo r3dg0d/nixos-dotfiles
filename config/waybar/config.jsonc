@@ -9,7 +9,7 @@
 
   "modules-left": ["niri/workspaces", "niri/window"],
   "modules-center": ["clock"],
-  "modules-right": ["tray", "custom/weather", "temperature", "pulseaudio", "network", "cpu", "memory", "battery"],
+  "modules-right": ["tray", "custom/weather", "temperature", "pulseaudio", "network", "cpu", "memory", "battery", "custom/power"],
 
   // NOTE: nerd-font icons are written as \uXXXX escapes on purpose — keep
   // them that way so they survive editors/tools that mangle PUA glyphs.
@@ -70,11 +70,12 @@
   },
 
   "network": {
-    "format-wifi": " {signalStrength}%",
+    "format-wifi": " {ipaddr}",
     "format-ethernet": "󰈀 {ipaddr}",
     "format-disconnected": " offline",
     "tooltip-format": "{ifname} via {gwaddr}",
-    "tooltip-format-wifi": "{essid} ({signalStrength}%)"
+    "tooltip-format-wifi": "{essid} ({signalStrength}%) — {ipaddr}",
+    "on-click": "qs ipc call wifi toggle"
   },
 
   "pulseaudio": {
@@ -88,5 +89,12 @@
   "tray": {
     "icon-size": 16,
     "spacing": 8
+  },
+
+  "custom/power": {
+    "format": "",
+    "tooltip": true,
+    "tooltip-format": "Power menu",
+    "on-click": "qs ipc call power toggle"
   }
 }

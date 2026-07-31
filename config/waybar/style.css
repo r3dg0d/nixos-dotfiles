@@ -65,6 +65,7 @@ window#waybar {
 #pulseaudio,
 #temperature,
 #custom-weather,
+#custom-power,
 #tray {
   padding: 0 10px;
   color: #ffffff;
@@ -77,6 +78,16 @@ window#waybar {
 #temperature { color: #39ff14; }
 #temperature.critical { color: #ff2b2b; text-shadow: 0 0 6px #ff2b2b; }
 #custom-weather { color: #ffffff; }
+#custom-power {
+  color: #ff2b2b;
+  padding: 0 12px;
+  text-shadow: 0 0 6px #ff2b2b;
+}
+#custom-power:hover {
+  color: #000000;
+  background: #ff2b2b;
+  border-radius: 8px;
+}
 
 #battery.warning  { color: #f5f543; }
 #battery.critical { color: #ff2b2b; text-shadow: 0 0 6px #ff2b2b; }
