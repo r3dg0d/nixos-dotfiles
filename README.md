@@ -65,9 +65,9 @@ The stack is wired into this config via niri binds and a `systemd` user service:
 
 Tools I built that this config depends on:
 
-- **[feathershot](config/scripts)** — a native Wayland screenshot + annotation tool (`grim`/`slurp` capture → GTK/Cairo editor for arrows, boxes, circles, text, freehand). Replaces niri's built-in screenshot on `PrtSc`.
+- **feathershot MKII** — a native Wayland screenshot + annotation tool, bound to `PrtSc` in [`config/niri/config.kdl`](config/niri/config.kdl) in place of niri's built-in screenshot. `grim`/`slurp` capture → a **Quickshell overlay**, [`config/quickshell/Feathershot.qml`](config/quickshell/Feathershot.qml), for arrows, boxes, circles, lines, freehand and text → composited back onto the original capture with cairo at native resolution. MKII moved the editor out of a per-screenshot GTK window and into the always-running `qs`, so it appears the instant you release the selection; shapes are tracked in image coordinates, so a scaled-down preview still saves full-size. The capture/render half is a separate flake (`~/Projects/feathershot`) installed with `nix profile`; the editor half is the widget in this repo.
 - **[SIVA](https://github.com/r3dg0d/siva)** + [siva-type](https://github.com/r3dg0d/siva-type) + [siva-voicefetch](https://github.com/r3dg0d/siva-voicefetch) — the voice-assistant stack above.
-- **quickshell widgets** — the clipboard/wifi/power/SIVA components in [`config/quickshell/`](config/quickshell).
+- **quickshell widgets** — the clipboard/wifi/power/SIVA/feathershot components in [`config/quickshell/`](config/quickshell).
 - **sddm-ascii-city** — the login theme above.
 - **Deep eboy voice** — a PipeWire filter-chain virtual mic (downward expander → shelving EQ → gain) defined in [`configuration.nix`](configuration.nix), selectable in Discord/OBS.
 
