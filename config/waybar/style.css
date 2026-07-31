@@ -93,6 +93,61 @@ window#waybar {
 #battery.critical { color: #ff2b2b; text-shadow: 0 0 6px #ff2b2b; }
 #battery.charging { color: #00ff41; }
 
+/* ── music player ───────────────────────────────────────────────────────── */
+
+#music {
+  background: #0a0a0a;
+  border: 1px solid #0e5c2a;
+  border-radius: 8px;
+  padding: 0 4px;
+  margin: 2px 4px;
+}
+
+#image.albumart {
+  border-radius: 4px;
+  margin: 0 6px 0 2px;
+}
+
+#custom-music {
+  color: #ffffff;
+  padding: 0 8px 0 2px;
+}
+
+#custom-music.play  { color: #00ff41; text-shadow: 0 0 6px #00ff41; }
+#custom-music.pause { color: #7cffa0; }
+#custom-music.stopped,
+#custom-music.offline { color: #6f8f79; }
+
+/* the visualizer — dim green bars so they read as texture, not another label */
+#cava {
+  color: #00ff41;
+  padding: 0 8px;
+  text-shadow: 0 0 5px #00ff41;
+}
+
+#custom-music-play,
+#custom-music-next,
+#custom-music-loop {
+  color: #ffffff;
+  padding: 0 7px;
+  border-radius: 6px;
+}
+
+#custom-music-play:hover,
+#custom-music-next:hover,
+#custom-music-loop:hover {
+  color: #000000;
+  background: #00ff41;
+  box-shadow: 0 0 8px #00ff41;
+}
+
+#custom-music-play.play { color: #00ff41; }
+
+/* loop: dim when off, lit when active, cyan-ish for repeat-one */
+#custom-music-loop.off { color: #555555; }
+#custom-music-loop.all { color: #00ff41; text-shadow: 0 0 6px #00ff41; }
+#custom-music-loop.one { color: #39ff14; text-shadow: 0 0 6px #39ff14; }
+
 tooltip {
   background: #000000;
   border: 1px solid #00ff41;

@@ -8,7 +8,7 @@
   "margin-right": 8,
 
   "modules-left": ["niri/workspaces", "niri/window"],
-  "modules-center": ["clock"],
+  "modules-center": ["group/music", "clock"],
   "modules-right": ["tray", "custom/weather", "temperature", "pulseaudio", "network", "cpu", "memory", "battery", "custom/power"],
 
   // NOTE: nerd-font icons are written as \uXXXX escapes on purpose — keep
@@ -27,6 +27,75 @@
     "format": "{title}",
     "max-length": 60,
     "separate-outputs": true
+  },
+
+  // ── music player ────────────────────────────────────────────────────────
+  // Backed by MPD on localhost:6600 — the same daemon rmpc drives, so the bar
+  // and the TUI always agree. Helper: config/scripts/music/mpd-widget.py
+  "group/music": {
+    "orientation": "horizontal",
+    "modules": [
+      "image#albumart",
+      "custom/music",
+      "cava",
+      "custom/music-play",
+      "custom/music-next",
+      "custom/music-loop"
+    ]
+  },
+
+  "image#albumart": {
+    "exec": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py art",
+    "size": 22,
+    "interval": 3,
+    "tooltip": false
+  },
+
+  // Long-running: blocks on MPD `idle` and reprints instantly on any change,
+  // so there is no polling lag on the track name.
+  "custom/music": {
+    "exec": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py watch",
+    "return-type": "json",
+    "max-length": 38,
+    "escape": true,
+    "on-click": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py toggle",
+    "on-scroll-up": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py next",
+    "on-scroll-down": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py prev"
+  },
+
+  "cava": {
+    "framerate": 60,
+    "autosens": 1,
+    "bars": 12,
+    "method": "pipewire",
+    "source": "auto",
+    "stereo": false,
+    "bar_delimiter": 0,
+    "hide_on_silence": false,
+    "format-icons": ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+  },
+
+  "custom/music-play": {
+    "exec": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py playicon",
+    "return-type": "json",
+    "interval": 2,
+    "signal": 10,
+    "on-click": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py toggle"
+  },
+
+  "custom/music-next": {
+    "format": "\uf051",
+    "tooltip": true,
+    "tooltip-format": "Next track",
+    "on-click": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py next"
+  },
+
+  "custom/music-loop": {
+    "exec": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py loopicon",
+    "return-type": "json",
+    "interval": 2,
+    "signal": 11,
+    "on-click": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py loop"
   },
 
   "clock": {
