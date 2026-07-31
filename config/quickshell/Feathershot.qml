@@ -1,6 +1,10 @@
 // Feathershot MKII — screenshot annotation overlay.
 // OLED black / white / neon-green (#00ff41), chrome at ~68% opacity.
 //
+// Upstream: https://github.com/r3dg0d/feathershot (qml/Feathershot.qml).
+// This is a working copy — changes worth keeping belong upstream too, or the
+// two drift apart.
+//
 // The `feathershot` CLI captures with slurp/grim, then hands the PNG over:
 //   qs ipc call feathershot open '{"image":"/tmp/…","width":…,"height":…}'
 // Because this lives in the always-running `qs`, the editor appears the
