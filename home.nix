@@ -244,6 +244,18 @@ in
     # Each entry shadows the package-provided .desktop (matched by filename, so
     # attr name/case must match) with NoDisplay=true. rmpc is a TUI kept for the
     # mpd setup; alacritty/firefox/dualcpy are just decluttered from the menu.
+    xdg.mimeApps = {
+      enable = true;
+      defaultApplications = {
+        "text/html" = [ "chromium-browser.desktop" ];
+        "application/xhtml+xml" = [ "chromium-browser.desktop" ];
+        "x-scheme-handler/http" = [ "chromium-browser.desktop" ];
+        "x-scheme-handler/https" = [ "chromium-browser.desktop" ];
+        "x-scheme-handler/about" = [ "chromium-browser.desktop" ];
+        "x-scheme-handler/unknown" = [ "chromium-browser.desktop" ];
+      };
+    };
+
     xdg.desktopEntries = {
       rmpc      = { name = "rmpc";      noDisplay = true; };
       firefox   = { name = "firefox";   noDisplay = true; };
