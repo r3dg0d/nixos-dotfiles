@@ -392,6 +392,14 @@ in
   # Mullvad VPN daemon (the mullvad-vpn package is the GUI/CLI; this runs the daemon)
   services.mullvad-vpn.enable = true;
 
+  # WiVRn: OpenXR streaming to standalone VR headsets. The module installs the
+  # dashboard/server, enables Avahi for headset discovery, and opens port 9757.
+  services.wivrn = {
+    enable = true;
+    openFirewall = true;
+    steam.importOXRRuntimes = true;
+  };
+
   # SearXNG metasearch, localhost-only. Secret lives in /etc/searxng.env
   # (not in the repo / nix store); @SEARXNG_SECRET@ is substituted from it.
   services.searx = {
@@ -531,7 +539,6 @@ in
      prismlauncher
      hydralauncher-wayland # Hydra game launcher (Electron + embedded bittorrent), Ozone-Wayland wrapped
      (pkgs.callPackage ./kyber-linuxport-unofficial.nix { })
-     wivrn # OpenXR streaming server/dashboard for standalone VR headsets
      sqlmap # Cybersecurity tools (SQLi tool)
      smap # Nmap fork that uses shodan.io
      hashcat
