@@ -26,32 +26,51 @@ let
     hash = "sha256-R/gE2zlLdw+TvzOHzaI0fD3dijsfVWgs/R8k8ES9gIA=";
   };
 
-  appimage = appimageTools.wrapType2 {
+  extracted = appimageTools.extract {
     inherit pname version src;
+  };
 
-    extraBwrapArgs = [
-      ''--setenv DISPLAY "$DISPLAY"''
-      ''--setenv XDG_RUNTIME_DIR "$XDG_RUNTIME_DIR"''
-      ''--setenv DBUS_SESSION_BUS_ADDRESS "$DBUS_SESSION_BUS_ADDRESS"''
-      ''--ro-bind-try "$XDG_RUNTIME_DIR/bus" "$XDG_RUNTIME_DIR/bus"''
-      ''--ro-bind-try "/tmp/.X11-unix/X''${DISPLAY#:}" "/tmp/.X11-unix/X''${DISPLAY#:}"''
-    ];
+  extraBwrapArgs = [
+    ''--setenv DISPLAY "$DISPLAY"''
+    ''--setenv XDG_RUNTIME_DIR "$XDG_RUNTIME_DIR"''
+    ''--setenv DBUS_SESSION_BUS_ADDRESS "$DBUS_SESSION_BUS_ADDRESS"''
+    ''--ro-bind-try "$XDG_RUNTIME_DIR/bus" "$XDG_RUNTIME_DIR/bus"''
+    ''--ro-bind-try "/tmp/.X11-unix/X''${DISPLAY#:}" "/tmp/.X11-unix/X''${DISPLAY#:}"''
+  ];
 
-    extraPkgs = pkgs: with pkgs; [
-      gtk3
-      fuse
-      gnutls
-      librsvg
-      libnotify
-      nettle
-      wayland
-      gst_all_1.gst-plugins-bad
-      gst_all_1.gst-plugins-ugly
-      gst_all_1.gst-libav
-      xdg-utils
-      zenity
-      gamemode
-    ];
+  extraPkgs = pkgs: with pkgs; [
+    gtk3
+    fuse
+    gnutls
+    librsvg
+    libnotify
+    nettle
+    wayland
+    gst_all_1.gst-plugins-bad
+    gst_all_1.gst-plugins-ugly
+    gst_all_1.gst-libav
+    xdg-utils
+    zenity
+    gamemode
+  ];
+
+  appimage = appimageTools.wrapAppImage {
+    inherit pname version extracted extraBwrapArgs extraPkgs;
+    src = extracted;
+  };
+
+  qrcHandler = appimageTools.wrapAppImage {
+    pname = "${pname}-qrc";
+    inherit version extracted extraBwrapArgs extraPkgs;
+    src = extracted;
+    runScript = "${extracted}/usr/bin/cli/maxima-bootstrap";
+  };
+
+  nxmHandler = appimageTools.wrapAppImage {
+    pname = "${pname}-nxm";
+    inherit version extracted extraBwrapArgs extraPkgs;
+    src = extracted;
+    runScript = "${extracted}/usr/bin/cli/bin/nxm_handler.sh";
   };
 
   desktopItem = makeDesktopItem {
@@ -61,12 +80,34 @@ let
     exec = "kyber-linuxport-unofficial";
     categories = [ "Game" ];
   };
+
+  qrcDesktopItem = makeDesktopItem {
+    name = "kyber-linuxport-qrc";
+    desktopName = "Kyber QRC Handler";
+    comment = "Receives qrc:// OAuth redirects for the Kyber EA login flow";
+    exec = "kyber-linuxport-qrc %u";
+    noDisplay = true;
+    terminal = false;
+    startupNotify = false;
+    mimeTypes = [ "x-scheme-handler/qrc" ];
+  };
+
+  nxmDesktopItem = makeDesktopItem {
+    name = "kyber-linuxport-nxm";
+    desktopName = "Kyber NXM Handler";
+    comment = "Receives nxm:// links from Nexus Mods and forwards them to Kyber";
+    exec = "kyber-linuxport-nxm %u";
+    noDisplay = true;
+    terminal = false;
+    startupNotify = false;
+    mimeTypes = [ "x-scheme-handler/nxm" ];
+  };
 in
 symlinkJoin {
   inherit pname version;
-  paths = [ appimage ];
+  paths = [ appimage qrcHandler nxmHandler ];
   nativeBuildInputs = [ copyDesktopItems makeWrapper ];
-  desktopItems = [ desktopItem ];
+  desktopItems = [ desktopItem qrcDesktopItem nxmDesktopItem ];
   postBuild = ''
     rm $out/bin/kyber-linuxport-unofficial
     makeWrapper ${appimage}/bin/kyber-linuxport-unofficial $out/bin/kyber-linuxport-unofficial \
@@ -79,8 +120,14 @@ symlinkJoin {
 
     mkdir -p $out/share/applications
     cp ${desktopItem}/share/applications/*.desktop $out/share/applications/
+    cp ${qrcDesktopItem}/share/applications/*.desktop $out/share/applications/
+    cp ${nxmDesktopItem}/share/applications/*.desktop $out/share/applications/
     substituteInPlace $out/share/applications/kyber-linuxport-unofficial.desktop \
       --replace-fail 'Exec=kyber-linuxport-unofficial' "Exec=$out/bin/kyber-linuxport-unofficial"
+    substituteInPlace $out/share/applications/kyber-linuxport-qrc.desktop \
+      --replace-fail 'Exec=kyber-linuxport-qrc %u' "Exec=$out/bin/kyber-linuxport-unofficial-qrc %u"
+    substituteInPlace $out/share/applications/kyber-linuxport-nxm.desktop \
+      --replace-fail 'Exec=kyber-linuxport-nxm %u' "Exec=$out/bin/kyber-linuxport-unofficial-nxm %u"
   '';
 
   meta = {
