@@ -50,6 +50,10 @@ symlinkJoin {
   paths = [ appimage ];
   nativeBuildInputs = [ copyDesktopItems ];
   desktopItems = [ desktopItem ];
+  postBuild = ''
+    mkdir -p $out/share/applications
+    cp ${desktopItem}/share/applications/*.desktop $out/share/applications/
+  '';
 
   meta = {
     description = "Unofficial Linux port of the Kyber mod launcher for Star Wars Battlefront II";
