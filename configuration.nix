@@ -531,6 +531,7 @@ in
      prismlauncher
      hydralauncher-wayland # Hydra game launcher (Electron + embedded bittorrent), Ozone-Wayland wrapped
      (pkgs.callPackage ./kyber-linuxport-unofficial.nix { })
+     wivrn # OpenXR streaming server/dashboard for standalone VR headsets
      sqlmap # Cybersecurity tools (SQLi tool)
      smap # Nmap fork that uses shodan.io
      hashcat
@@ -642,4 +643,3 @@ in
   system.stateVersion = "26.05";
 
 }
-
