@@ -10,6 +10,7 @@ Scope {
     readonly property int maxDiameter: 1360
     property int diameter: defaultDiameter
     property bool mirrored: true
+    property bool shown: false
     property string state: "hidden"
     property string lastCameraStatus: "No camera started"
     property string lastDevice: ""
@@ -30,17 +31,19 @@ Scope {
     }
 
     function show(): void {
+        shown = true;
         state = "starting";
         mirrorWindow.showMirror();
     }
 
     function hide(): void {
+        shown = false;
         mirrorWindow.hideMirror();
         state = "hidden";
     }
 
     function toggle(): void {
-        if (mirrorWindow.visible)
+        if (shown)
             hide();
         else
             show();
@@ -114,13 +117,13 @@ Scope {
 
     CameraController {
         id: cameraController
-        active: mirrorWindow.visible
+        active: root.shown
 
         onStatusChanged: {
             root.lastCameraStatus = statusText;
             root.lastDevice = deviceDescription;
             root.lastFormat = formatDescription;
-            if (mirrorWindow.visible)
+            if (root.shown)
                 root.state = errorText.length > 0 ? "error" : (cameraActive ? "visible" : "starting");
         }
     }
@@ -138,7 +141,7 @@ Scope {
 
         onDiameterChanged: root.setDiameter(diameter)
         onVisibleChanged: {
-            if (!visible)
+            if (!root.shown)
                 root.state = "hidden";
             else if (cameraController.errorText.length > 0)
                 root.state = "error";
