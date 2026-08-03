@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+qs_bin="${QS_BIN:-qs}"
+target="mirror"
+signal="${MIRROR_WAYBAR_SIGNAL:-12}"
+
+notify_waybar() {
+  if command -v pkill >/dev/null 2>&1; then
+    pkill "-RTMIN+${signal}" -x waybar >/dev/null 2>&1 || true
+  fi
+}
+
+ipc_ready() {
+  "$qs_bin" ipc show 2>/dev/null | grep -q "^target ${target}$"
+}
+
+if ! ipc_ready; then
+  "$qs_bin" -n -d >/dev/null 2>&1 || true
+  for _ in $(seq 1 40); do
+    if ipc_ready; then
+      break
+    fi
+    sleep 0.05
+  done
+fi
+
+if ! ipc_ready; then
+  echo "Mirror IPC target did not register" >&2
+  notify_waybar
+  exit 1
+fi
+
+"$qs_bin" ipc call "$target" toggle >/dev/null
+notify_waybar

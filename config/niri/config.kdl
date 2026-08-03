@@ -65,6 +65,14 @@ window-rule {
     clip-to-geometry true
 }
 
+window-rule {
+    match title="^Mirror$"
+
+    open-floating true
+    open-focused false
+    default-floating-position x=32 y=32 relative-to="top-right"
+}
+
 // Spawn on startup
 spawn-at-startup "waybar"
 spawn-at-startup "mako"

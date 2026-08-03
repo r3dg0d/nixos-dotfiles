@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+qs_bin="${QS_BIN:-qs}"
+icon="🪞"
+state="hidden"
+
+json() {
+  local class="$1"
+  local tooltip="$2"
+  printf '{"text":"%s","tooltip":"%s","class":"%s"}\n' "$icon" "$tooltip" "$class"
+}
+
+if "$qs_bin" ipc show 2>/dev/null | grep -q '^target mirror$'; then
+  if state="$("$qs_bin" ipc call mirror status 2>/dev/null)"; then
+    case "$state" in
+      visible|starting) json "active" "Mirror: ${state}" ;;
+      hidden) json "inactive" "Mirror: hidden" ;;
+      error) json "error" "Mirror: camera error" ;;
+      *) json "error" "Mirror: ${state}" ;;
+    esac
+  else
+    json "error" "Mirror: IPC call failed"
+  fi
+else
+  json "inactive" "Mirror: hidden"
+fi

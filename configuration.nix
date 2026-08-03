@@ -58,6 +58,21 @@ let
         --replace-fail '${pkgs.hydralauncher}/bin/hydralauncher --no-sandbox' \
                        "$out/bin/hydralauncher"
     '';
+
+  quickshell-mirror = pkgs.symlinkJoin {
+    name = "quickshell-mirror-${pkgs.quickshell.version}";
+    paths = [ pkgs.quickshell ];
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+    postBuild = ''
+      rm -f $out/bin/qs $out/bin/quickshell
+      makeWrapper ${pkgs.quickshell}/bin/qs $out/bin/qs \
+        --prefix NIXPKGS_QT6_QML_IMPORT_PATH : ${pkgs.qt6.qtmultimedia}/lib/qt-6/qml \
+        --prefix QT_PLUGIN_PATH : ${pkgs.qt6.qtmultimedia}/lib/qt-6/plugins
+      makeWrapper ${pkgs.quickshell}/bin/quickshell $out/bin/quickshell \
+        --prefix NIXPKGS_QT6_QML_IMPORT_PATH : ${pkgs.qt6.qtmultimedia}/lib/qt-6/qml \
+        --prefix QT_PLUGIN_PATH : ${pkgs.qt6.qtmultimedia}/lib/qt-6/plugins
+    '';
+  };
 in
 {
   imports =
@@ -561,7 +576,12 @@ in
      mako
      nautilus
      emojipick
-     quickshell
+     quickshell-mirror
+     qt6.qtmultimedia
+     qt6.qtdeclarative
+     qt6.qtsvg
+     v4l-utils
+     shellcheck
      cliphist
      mpv
      file-roller

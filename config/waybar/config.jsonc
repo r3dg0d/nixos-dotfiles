@@ -9,7 +9,7 @@
 
   "modules-left": ["niri/workspaces", "niri/window"],
   "modules-center": ["group/music", "clock"],
-  "modules-right": ["tray", "custom/weather", "temperature", "pulseaudio", "network", "cpu", "memory", "battery", "custom/power"],
+  "modules-right": ["tray", "custom/weather", "temperature", "pulseaudio", "network", "cpu", "memory", "battery", "custom/mirror", "custom/power"],
 
   // NOTE: nerd-font icons are written as \uXXXX escapes on purpose — keep
   // them that way so they survive editors/tools that mangle PUA glyphs.
@@ -158,6 +158,15 @@
   "tray": {
     "icon-size": 16,
     "spacing": 8
+  },
+
+  "custom/mirror": {
+    "exec": "/home/r3dg0d/nixos-dotfiles/config/quickshell/Mirror/scripts/mirror-status",
+    "return-type": "json",
+    "interval": 2,
+    "signal": 12,
+    "on-click": "/home/r3dg0d/nixos-dotfiles/config/quickshell/Mirror/scripts/mirror-toggle",
+    "tooltip": true
   },
 
   "custom/power": {

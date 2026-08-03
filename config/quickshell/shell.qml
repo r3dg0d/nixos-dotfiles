@@ -6,6 +6,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "Mirror"
 
 ShellRoot {
     id: root
@@ -19,6 +20,7 @@ ShellRoot {
     Wifi {}     // nmcli wifi picker; toggle via `qs ipc call wifi toggle` (waybar network click)
     Power {}    // power menu (logout/restart/shutdown/sleep); `qs ipc call power toggle` (waybar power click)
     Feathershot {}  // screenshot annotation overlay; opened by the `feathershot` CLI after slurp/grim
+    Mirror {}     // floating webcam mirror; `qs ipc call mirror toggle` (waybar mirror click)
 
     property bool shown: false
     property var entries: []
