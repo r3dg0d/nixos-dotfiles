@@ -15,22 +15,9 @@
       url = "github:areofyl/fetch";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
-    # TUI-only web browser, developed locally in ~/Projects/tuiweb.
-    # Its overlay exposes pkgs.tuiweb.
-    #
-    # PORTABILITY: this is the one input that is not fetchable from the
-    # network. `install.sh` checks for the checkout up front and tells you what
-    # to do if it is missing, rather than letting nix fail deep into an eval.
-    # After committing changes over there, run `nix flake update tuiweb` here
-    # before rebuilding to pick them up.
-    tuiweb = {
-      url = "git+file:///home/r3dg0d/Projects/tuiweb";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, nixpkgs, home-manager, fetch, tuiweb, ... }:
+  outputs = { self, nixpkgs, home-manager, fetch, ... }:
     let
       # Every system this flake's *packages* are built for. The NixOS hosts
       # below pin their own.
@@ -39,7 +26,6 @@
 
       overlays = [
         fetch.overlays.default
-        tuiweb.overlays.default
         (import ./pkgs)
       ];
 
