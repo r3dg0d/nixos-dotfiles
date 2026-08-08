@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""SIVA always-on wake-word listener.
+
+Streams the mic at 16 kHz through openWakeWord's feature extractor and the
+user-trained "Siva" verifier (see siva-enroll). On detection, sends
+{"type":"toggle"} to the SIVA daemon — exactly like pressing F8 — but only
+while the daemon is idle, with a cooldown so one utterance can't double-fire.
+
+Waits politely if the verifier hasn't been trained yet.
+"""
+import collections
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import wave
+
+sys.path.insert(0, os.path.expanduser("~/.local/share/siva/pylib"))
+import numpy as np  # noqa: E402
+import siva_wake_common as swc  # noqa: E402
+
+SIVA_SOCK = "/tmp/siva.sock"
+# Stage 1 (openWakeWord + the trained verifier) is a cheap always-on spotter;
+# stage 2 (whisper STT, below) confirms the word before we actually fire. That
+# lets stage 1 be deliberately *sensitive* (few misses) while stage 2 supplies
+# the precision (few false alarms) — the split is what gets us near-100% real
+# activations with almost no false positives.
+CONSECUTIVE = int(os.environ.get("SIVA_WAKE_CONSECUTIVE", "2"))  # frames >= thr (x 80 ms)
+COOLDOWN = 5.0        # seconds after a CONFIRMED trigger before we listen again
+REJECT_COOLDOWN = 2.5  # gate after a stage-2 rejection — bounds whisper churn on nearby speech
+RING_SECONDS = 2.0    # rolling raw audio kept for STT confirmation
+
+WHISPER_MODEL = os.path.expanduser("~/.local/share/siva/ggml-base.en.bin")
+WHISPER_FALLBACK = os.path.expanduser("~/.local/share/voice-type/models/ggml-tiny.bin")
+CONFIRM_WAV = "/tmp/siva-wake-confirm.wav"
+# stage-2 STT confirmation on by default; set SIVA_WAKE_CONFIRM=0 to disable
+CONFIRM = os.environ.get("SIVA_WAKE_CONFIRM", "1").lower() not in ("0", "false", "no")
+
+# whisper renderings of "Siva" we accept outright (beyond edit-distance 1)
+WAKE_SPELLINGS = {"siva", "shiva", "syva", "civa", "ziva", "seva", "siwa",
+                  "sifa", "sylva", "seava", "sriva"}
+
+
+def log(*a):
+    print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
+
+
+def sh(cmd, timeout=15):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except Exception as e:
+        return 1, str(e)
+
+
+def _lev(a, b):
+    """Levenshtein distance (small strings)."""
+    if a == b:
+        return 0
+    if not a or not b:
+        return len(a) or len(b)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def heard_wake(text):
+    """True if an STT transcript plausibly contains the 'Siva' wake word.
+    Permissive on the wake token itself (known whisper spellings + any word
+    within edit-distance 1 of 'siva') but rejects ordinary speech — that
+    asymmetry is exactly what suppresses false positives while keeping real
+    'Siva' / 'Hey Siva' near 100%."""
+    for t in re.findall(r"[a-z]+", text.lower()):
+        if t in WAKE_SPELLINGS or _lev(t, "siva") <= 1:
+            return True
+    return False
+
+
+def confirm_wake(audio_i16):
+    """Stage 2: transcribe the buffered audio and check for the wake word.
+    Returns (ok, transcript). Fails OPEN (ok=True) if whisper is unavailable
+    or errors, so the wake word still works on stage 1 alone."""
+    model = WHISPER_MODEL if os.path.exists(WHISPER_MODEL) else WHISPER_FALLBACK
+    if not os.path.exists(model):
+        return True, "(no whisper model — stage 1 only)"
+    try:
+        with wave.open(CONFIRM_WAV, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(audio_i16.tobytes())
+    except Exception as e:
+        return True, f"(wav error: {e})"
+    # capture stdout ONLY (the transcript); whisper-cli logs backend/model
+    # diagnostics to stderr, which we must not fold into the transcript text
+    try:
+        p = subprocess.run(["whisper-cli", "-m", model, "-f", CONFIRM_WAV,
+                            "-l", "en", "-np", "-nt", "-t", "8"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           text=True, timeout=15)
+    except Exception:
+        return True, "(whisper failed — stage 1 only)"
+    if p.returncode != 0:
+        return True, "(whisper failed — stage 1 only)"
+    text = " ".join(l.strip() for l in (p.stdout or "").splitlines()
+                    if l.strip() and not l.startswith("["))
+    text = re.sub(r"\s+", " ", text).strip()
+    return heard_wake(text), text
+
+
+def find_mic():
+    _, out = sh(["wpctl", "status"])
+    in_sources = False
+    for line in out.splitlines():
+        if "Sources:" in line:
+            in_sources = True
+            continue
+        if not in_sources:
+            continue
+        m = re.search(r"(\d+)\.\s+(.+?)\s*\[vol", line)
+        if not m:
+            in_sources = False
+            continue
+        if re.search(r"scarlett|focusrite", m.group(2), re.I):
+            return m.group(1)
+    return None
+
+
+class DaemonLink:
+    """Tracks SIVA daemon state over /tmp/siva.sock; used to gate triggers."""
+
+    def __init__(self):
+        self.state = "unknown"
+        self.sock = None
+        self.lock = threading.Lock()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        while True:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(SIVA_SOCK)
+                with self.lock:
+                    self.sock = s
+                log("connected to siva daemon")
+                for line in s.makefile("r"):
+                    try:
+                        m = json.loads(line)
+                        if m.get("type") == "status":
+                            self.state = m["value"]
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+            except OSError:
+                pass
+            with self.lock:
+                self.sock = None
+            self.state = "unknown"
+            time.sleep(2)
+
+    def toggle(self):
+        with self.lock:
+            if self.sock:
+                try:
+                    self.sock.sendall(b'{"type": "toggle"}\n')
+                    return True
+                except OSError:
+                    pass
+        return False
+
+
+def main():
+    while not os.path.exists(swc.VERIFIER):
+        log("no verifier yet — run siva-enroll; checking again in 30s")
+        time.sleep(30)
+
+    clf, thr = swc.load_verifier()
+    feats = swc.make_features()
+    daemon = DaemonLink()
+    stt = CONFIRM and (os.path.exists(WHISPER_MODEL) or os.path.exists(WHISPER_FALLBACK))
+    log(f"wake listener up (threshold {thr:.2f}, stage-2 STT "
+        f"{'on' if stt else 'OFF'}, consecutive {CONSECUTIVE})")
+
+    hot = 0
+    last_fire = 0.0
+    cooldown = COOLDOWN
+    chunk_bytes = swc.CHUNK_SAMPLES * 2
+    # rolling raw-audio buffer (~RING_SECONDS) so stage 2 can transcribe the
+    # word that just tripped stage 1 without re-recording it
+    ring = collections.deque(maxlen=max(1, int(RING_SECONDS / swc.FRAME_SEC)))
+
+    while True:
+        cmd = ["pw-record", "--format", "s16", "--rate", "16000",
+               "--channels", "1", "-"]
+        mic = find_mic()
+        if mic:
+            cmd[1:1] = ["--target", mic]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        log("capture stream started", f"(mic {mic or 'default'})")
+        zeros_run = 0
+        ring.clear()
+        try:
+            while True:
+                data = proc.stdout.read(chunk_bytes)
+                if not data or len(data) < chunk_bytes:
+                    break
+                chunk = np.frombuffer(data, dtype=np.int16)
+                ring.append(chunk)
+
+                # dead-stream guard (same failure mode as siva-daemon)
+                if not chunk.any():
+                    zeros_run += 1
+                    if zeros_run > 25:  # 2 s of digital silence from a live mic
+                        log("capture stream dead — restarting pw-record")
+                        break
+                else:
+                    zeros_run = 0
+
+                feats(chunk)
+                x = feats.get_features(swc.WINDOW).reshape(1, -1).astype(np.float32)
+                p = float(clf.predict_proba(x)[0, 1])
+                hot = hot + 1 if p >= thr else 0
+                if hot < CONSECUTIVE:
+                    continue
+
+                # stage 1 tripped
+                hot = 0
+                now = time.time()
+                if now - last_fire < cooldown or daemon.state != "idle":
+                    continue
+
+                if stt:
+                    audio = np.concatenate(list(ring)) if ring else chunk
+                    ok, heard = confirm_wake(audio)
+                    if not ok:
+                        log(f"stage-1 p={p:.2f} REJECTED by STT — heard: {heard!r}")
+                        last_fire, cooldown = now, REJECT_COOLDOWN
+                        feats.reset()
+                        ring.clear()
+                        continue
+                    log(f"wake CONFIRMED! p={p:.2f} heard: {heard!r} -> toggle")
+                else:
+                    log(f"wake word! p={p:.2f} -> toggle")
+
+                last_fire, cooldown = now, COOLDOWN
+                daemon.toggle()
+                feats.reset()
+                ring.clear()
+        finally:
+            proc.kill()
+            feats.reset()
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""siva-rvc — convert a wav through the selected RVC voice.
+
+    siva-rvc [--voice SLUG] [--transpose N] IN.wav OUT.wav
+    siva-rvc --check          # 0 if the engine is installed
+
+Exit codes: 0 ok, 1 conversion failed, 3 engine/voice unavailable.
+
+Thin client: resolves the voice (--voice or ~/.local/share/siva/voice.json),
+boots the resident rvc_server.py inside its venv if needed, then sends one
+JSON request over /tmp/siva-rvc.sock. On NixOS the venv's pip wheels need
+LD_LIBRARY_PATH globbed from /nix/store at every run (store paths move on
+rebuilds) plus /run/opengl-driver/lib for the CUDA driver.
+"""
+
+import glob
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+RVC_DIR = os.path.join(HOME, ".local/share/siva/rvc")
+VOICES_DIR = os.path.join(HOME, ".local/share/siva/voices")
+SELECT_FILE = os.path.join(HOME, ".local/share/siva/voice.json")
+SOCK = "/tmp/siva-rvc.sock"
+
+
+def installed():
+    return all(os.path.exists(os.path.join(RVC_DIR, p)) for p in
+               ("venv/bin/python", "rvc_server.py",
+                "assets/rmvpe.pt", "assets/contentvec",
+                "pylib/infer/lib/rmvpe.py"))
+
+
+def nix_lib_path():
+    """64-bit libstdc++/zlib from the store (ELF class byte 02 — the
+    32-bit graphics libs are in there too) + the CUDA driver dir."""
+    dirs = []
+    for so in ("libstdc++.so.6", "libz.so.1"):
+        for f in sorted(glob.glob(f"/nix/store/*/lib/{so}")):
+            try:
+                with open(f, "rb") as fh:
+                    if fh.read(5)[4] == 2:
+                        dirs.append(os.path.dirname(f))
+                        break
+            except OSError:
+                continue
+    dirs.append("/run/opengl-driver/lib")
+    return ":".join(dirs)
+
+
+def connect(timeout=1.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(SOCK)
+    return s
+
+
+def ensure_server():
+    try:
+        return connect()
+    except OSError:
+        pass
+    env = {**os.environ, "LD_LIBRARY_PATH": nix_lib_path(),
+           "HF_HUB_DISABLE_XET": "1", "HF_HUB_OFFLINE": "1"}
+    subprocess.Popen(
+        [os.path.join(RVC_DIR, "venv/bin/python"),
+         os.path.join(RVC_DIR, "rvc_server.py")],
+        env=env, start_new_session=True,
+        stdout=open("/tmp/siva-rvc-server.log", "ab"),
+        stderr=subprocess.STDOUT)
+    for _ in range(100):
+        time.sleep(0.2)
+        try:
+            return connect()
+        except OSError:
+            continue
+    print("siva-rvc: server did not come up", file=sys.stderr)
+    sys.exit(3)
+
+
+def main():
+    args = sys.argv[1:]
+    if "--check" in args:
+        sys.exit(0 if installed() else 3)
+    if not installed():
+        print("siva-rvc: engine not installed (run siva-rvc-setup)",
+              file=sys.stderr)
+        sys.exit(3)
+
+    voice, transpose = "", 0
+    pos = []
+    it = iter(args)
+    for a in it:
+        if a == "--voice":
+            voice = next(it, "")
+        elif a == "--transpose":
+            transpose = int(next(it, "0"))
+        else:
+            pos.append(a)
+    if len(pos) != 2:
+        print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
+        sys.exit(1)
+    wav_in, wav_out = (os.path.abspath(p) for p in pos)
+
+    if voice:
+        vdir = os.path.join(VOICES_DIR, os.path.basename(voice))
+        pth = os.path.join(vdir, "model.pth")
+        idx = os.path.join(vdir, "model.index")
+        sel = {"pth": pth, "index": idx if os.path.exists(idx) else ""}
+    else:
+        try:
+            sel = json.load(open(SELECT_FILE))
+        except Exception:
+            sys.exit(3)          # no voice selected — caller keeps plain TTS
+    if not sel.get("pth") or not os.path.exists(sel["pth"]):
+        sys.exit(3)
+
+    s = ensure_server()
+    s.settimeout(300)
+    s.sendall((json.dumps({
+        "cmd": "convert", "pth": sel["pth"], "index": sel.get("index", ""),
+        "in": wav_in, "out": wav_out, "transpose": transpose}) + "\n").encode())
+    resp = json.loads(s.makefile("r").readline() or "{}")
+    if not resp.get("ok"):
+        print("siva-rvc:", resp.get("error", "no response"), file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

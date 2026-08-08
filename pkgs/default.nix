@@ -12,6 +12,12 @@ final: prev: {
   quickshell-mirror = final.callPackage ./quickshell-mirror.nix { };
   hydralauncher-wayland = final.callPackage ./hydralauncher-wayland.nix { };
 
+  # ---- SIVA voice-assistant stack ---------------------------------------
+  siva = final.callPackage ./siva { };
+  siva-type = final.callPackage ./siva-type { };
+  siva-voicefetch = final.callPackage ./siva-voicefetch { };
+  siva-fetch-assets = final.callPackage ./siva-fetch-assets.nix { };
+
   # ---- applications -----------------------------------------------------
   davinci-resolve-studio-unofficial = final.callPackage ./davinci-resolve.nix { };
   kyber-linuxport-unofficial = final.callPackage ./kyber-linuxport-unofficial.nix { };

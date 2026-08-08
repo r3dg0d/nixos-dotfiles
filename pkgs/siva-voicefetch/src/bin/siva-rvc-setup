@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# SIVA Voicefetch — RVC v2 inference environment setup.
+#
+# Builds a fairseq-free RVC inference stack (fairseq has no wheels past
+# cp38, so the classic rvc-python/infer-rvc-python packages are
+# uninstallable on modern Python). Instead:
+#   * venv on the system python3 with torch/torchaudio/transformers
+#   * ContentVec content encoder via transformers (lengyue233/content-vec-best)
+#   * RVC-Project's pure-torch infer_pack + rmvpe vendored at a pinned commit
+#   * rmvpe.pt pitch-extractor weights from lj1995/VoiceConversionWebUI
+#
+# Idempotent: safe to re-run; only downloads what's missing.
+set -euo pipefail
+
+RVC_DIR="$HOME/.local/share/siva/rvc"
+VENV="$RVC_DIR/venv"
+LIB="$RVC_DIR/pylib/infer/lib"   # matches the code's `infer.lib.*` absolute imports
+ASSETS="$RVC_DIR/assets"
+# RVC-Project/Retrieval-based-Voice-Conversion-WebUI pinned for reproducibility
+RVC_REF="7ef19867780cf703841ebafb565a4e47d1ea86ff"
+RAW="https://raw.githubusercontent.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI/$RVC_REF"
+
+mkdir -p "$RVC_DIR" "$LIB/infer_pack" "$ASSETS"
+
+echo "== venv =="
+[[ -x "$VENV/bin/python" ]] || python3 -m venv "$VENV"
+# python -m pip (not bin/pip): survives the venv being relocated
+"$VENV/bin/python" -m pip install -q -U pip
+
+echo "== python deps (torch is ~2.5GB, be patient) =="
+"$VENV/bin/python" -m pip install -q torch torchaudio transformers faiss-cpu soundfile scipy numpy requests librosa
+
+echo "== vendored RVC code (pinned $RVC_REF) =="
+fetch() { # fetch <repo-path> <dest>
+    [[ -s "$2" ]] && return 0
+    echo "  $1"
+    curl -fsSL --retry 3 "$RAW/$1" -o "$2"
+}
+fetch infer/lib/infer_pack/models.py      "$LIB/infer_pack/models.py"
+fetch infer/lib/infer_pack/modules.py     "$LIB/infer_pack/modules.py"
+fetch infer/lib/infer_pack/attentions.py  "$LIB/infer_pack/attentions.py"
+fetch infer/lib/infer_pack/commons.py     "$LIB/infer_pack/commons.py"
+fetch infer/lib/infer_pack/transforms.py  "$LIB/infer_pack/transforms.py"
+fetch infer/lib/rmvpe.py                  "$LIB/rmvpe.py"
+touch "$LIB/infer_pack/__init__.py" "$LIB/__init__.py" "$RVC_DIR/pylib/infer/__init__.py"
+mkdir -p "$LIB/jit"
+[[ -s "$LIB/jit/__init__.py" ]] || cat > "$LIB/jit/__init__.py" <<'EOF'
+# stub: torch.jit export helpers from RVC-WebUI are unused here (use_jit=False)
+def load(*a, **k):
+    raise NotImplementedError("jit export not vendored")
+def rmvpe_jit_export(*a, **k):
+    raise NotImplementedError("jit export not vendored")
+EOF
+
+echo "== model assets =="
+if [[ ! -s "$ASSETS/rmvpe.pt" ]]; then
+    echo "  rmvpe.pt"
+    curl -fsSL --retry 3 \
+        "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt" \
+        -o "$ASSETS/rmvpe.pt"
+fi
+# ContentVec (fairseq-free HuBERT port) — cached under $ASSETS/contentvec
+if [[ ! -d "$ASSETS/contentvec" ]]; then
+    echo "  contentvec (transformers port)"
+    "$VENV/bin/python" - <<'EOF'
+import os
+os.environ["HF_HUB_DISABLE_XET"] = "1"   # xet backend 401s anon downloads
+from huggingface_hub import snapshot_download
+snapshot_download("lengyue233/content-vec-best",
+                  local_dir=os.path.expanduser("~/.local/share/siva/rvc/assets/contentvec"))
+EOF
+fi
+
+echo "== smoke test =="
+if [[ -x "$HOME/.local/bin/siva-rvc" ]]; then
+    "$HOME/.local/bin/siva-rvc" --check && echo "OK: siva-rvc ready" \
+        || { echo "siva-rvc --check failed"; exit 1; }
+else
+    echo "siva-rvc not installed yet — skipping"
+fi

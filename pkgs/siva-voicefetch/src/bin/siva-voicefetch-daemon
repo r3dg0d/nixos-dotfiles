@@ -1,0 +1,713 @@
+#!/usr/bin/env python3
+"""SIVA Voicefetch daemon — RVC v2 voice-model downloader for SIVA.
+
+Bridges the quickshell overlay (unix socket, newline-JSON) with
+voice-models.com. Searches the site's fetch_data.php JSON endpoint,
+downloads models through per-host handlers (Hugging Face direct,
+Google Drive confirm-token flow, Drive folder listing), unpacks them
+into the voice library, and exposes voice selection to the main SIVA
+assistant via ~/.local/share/siva/voice.json. Stdlib only.
+
+Protocol, daemon -> UI (one JSON object per line):
+  {"type":"show"} / {"type":"hide"} / {"type":"ping"}
+  {"type":"busy","value":true|false}                 search in flight
+  {"type":"results","query":q,"page":n,"pages":N,"items":[
+      {"id","name","creator","size","url","kind"}]}
+  {"type":"queue","items":[
+      {"qid","name","state","progress","done_mb","total_mb","error"}]}
+  {"type":"library","items":[
+      {"slug","name","creator","size_mb","has_index","added","updated"}]}
+  {"type":"selected","slug":s}                       "" = piper default
+  {"type":"rvc","ready":bool}                        rvc engine availability
+  {"type":"toast","text":...}
+
+UI/keybind -> daemon:
+  {"type":"toggle"} / {"type":"hide"}                F7 semantics
+  {"type":"search","query":q,"page":n}
+  {"type":"download","item":{...result row...}}
+  {"type":"cancel","qid":n}
+  {"type":"remove","slug":s}
+  {"type":"select","slug":s}                         "" reverts to piper
+  {"type":"preview","slug":s}
+  {"type":"check_updates"}
+  {"type":"refresh"}
+"""
+
+import html
+import io
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from http.cookiejar import CookieJar
+
+HOME = os.path.expanduser("~")
+SOCK_PATH = "/tmp/siva-voicefetch.sock"
+LOG = "/tmp/siva-voicefetch.log"
+SITE = "https://voice-models.com"
+VOICES_DIR = os.path.join(HOME, ".local/share/siva/voices")
+SELECT_FILE = os.path.join(HOME, ".local/share/siva/voice.json")
+PIPER_VOICE = os.path.join(HOME, ".local/share/siva/piper/en_US-lessac-medium.onnx")
+UA = "Mozilla/5.0 (X11; Linux x86_64) SIVA-Voicefetch/1.0"
+CHUNK = 256 * 1024
+UPDATE_PERIOD = 6 * 3600
+PREVIEW_TEXT = ("This is a test of {name}. "
+                "If you like this character's voice, apply it to SIVA!")
+
+
+def log(*a):
+    with open(LOG, "a") as f:
+        f.write(time.strftime("[%H:%M:%S] ") + " ".join(str(x) for x in a) + "\n")
+
+
+def strip_tags(s):
+    return html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
+
+
+def classify_url(url):
+    h = urllib.parse.urlparse(url).netloc.lower()
+    if "huggingface.co" in h:
+        return "huggingface"
+    if "drive.google.com" in h or "drive.usercontent.google.com" in h:
+        return "gdrive-folder" if "/drive/folders/" in url or "/folderview" in url \
+            else "gdrive"
+    if "pixeldrain" in h:
+        return "pixeldrain"
+    if "mega.nz" in h or "mega.co.nz" in h:
+        return "mega"
+    return "direct"
+
+
+def slugify(name):
+    s = re.sub(r"\[.*?\]", "", name)              # drop [RVC v2] [300 Epochs] tags
+    s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+    return s[:40].rstrip("-") or "voice"
+
+
+# ── UI hub ────────────────────────────────────────────────────────────
+class UIHub:
+    def __init__(self):
+        self.clients = []
+        self.lock = threading.Lock()
+
+    def add(self, conn):
+        with self.lock:
+            self.clients.append(conn)
+
+    def send(self, obj):
+        data = (json.dumps(obj) + "\n").encode()
+        with self.lock:
+            for c in self.clients[:]:
+                try:
+                    c.sendall(data)
+                except OSError:
+                    self.clients.remove(c)
+
+
+# ── voice-models.com scraper ──────────────────────────────────────────
+class Scraper:
+    """Search via the site's own AJAX endpoint (POST fetch_data.php ->
+    {"table": "<tr>...", "pagination": "..."}), rows parsed with regex.
+    curl does the transport — TLS, redirects, compression for free."""
+
+    ROW = re.compile(r"<tr>(.*?)</tr>", re.S)
+    MODEL = re.compile(r"href='/model/([^']+)'[^>]*>(.*?)</a>", re.S)
+    CREATOR = re.compile(r"href='/creator/[^']*'[^>]*>([^<]*)</a>")
+    SIZE = re.compile(r"badge bg-secondary[^>]*>([^<]+)<")
+    CLIP = re.compile(r"data-clipboard-text='([^']+)'")
+    PAGE = re.compile(r"fetchData\((\d+)")
+
+    def search(self, query, page=1):
+        p = subprocess.run(
+            ["curl", "-sf", "--max-time", "25", "-A", UA,
+             "-X", "POST", SITE + "/fetch_data.php",
+             "--data-urlencode", f"page={page}",
+             "--data-urlencode", f"search={query}"],
+            capture_output=True, timeout=30)
+        if p.returncode != 0:
+            raise RuntimeError(f"voice-models.com unreachable (curl {p.returncode})")
+        data = json.loads(p.stdout)
+        items = []
+        for row in self.ROW.findall(data.get("table", "")):
+            m = self.MODEL.search(row)
+            u = self.CLIP.search(row)
+            if not m or not u:
+                continue
+            url = html.unescape(u.group(1))
+            c = self.CREATOR.search(row)
+            s = self.SIZE.search(row)
+            items.append({
+                "id": m.group(1),
+                "name": strip_tags(m.group(2)),
+                "creator": (c.group(1).strip() if c else ""),
+                "size": (s.group(1).strip() if s else ""),
+                "url": url,
+                "kind": classify_url(url),
+            })
+        pages = max((int(n) for n in self.PAGE.findall(data.get("pagination", ""))),
+                    default=page)
+        return items, pages
+
+
+# ── download backends ─────────────────────────────────────────────────
+class Cancelled(Exception):
+    pass
+
+
+class Downloader:
+    """Streams a model URL into a temp dir and returns the file paths.
+    Hugging Face resolve links are plain redirects; Google Drive needs
+    the confirm-token dance for big files; Drive folders are listed via
+    the embeddedfolderview endpoint. wget is the fallback transport when
+    the urllib stream fails."""
+
+    def __init__(self):
+        jar = CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(jar))
+        self.opener.addheaders = [("User-Agent", UA)]
+
+    def fetch(self, url, dest_dir, item):
+        kind = classify_url(url)
+        if kind == "mega":
+            raise RuntimeError("mega.nz links need the MEGA client — unsupported")
+        if kind == "gdrive-folder":
+            return self.fetch_gdrive_folder(url, dest_dir, item)
+        if kind == "gdrive":
+            return [self.fetch_gdrive_file(url, dest_dir, item)]
+        if kind == "pixeldrain":
+            m = re.search(r"pixeldrain\.com/u/(\w+)", url)
+            if m:
+                url = f"https://pixeldrain.com/api/file/{m.group(1)}?download"
+        return [self.stream(url, dest_dir, item)]
+
+    # — generic streaming with progress —
+    def stream(self, url, dest_dir, item, fallback_name="model.bin"):
+        try:
+            return self._urllib_stream(url, dest_dir, item, fallback_name)
+        except Cancelled:
+            raise
+        except Exception as e:
+            log("urllib stream failed, wget fallback:", e)
+            return self._wget(url, dest_dir, item, fallback_name)
+
+    def _urllib_stream(self, url, dest_dir, item, fallback_name):
+        req = urllib.request.Request(url)
+        with self.opener.open(req, timeout=60) as resp:
+            name = self._filename(resp, url) or fallback_name
+            total = int(resp.headers.get("Content-Length") or 0)
+            path = os.path.join(dest_dir, name)
+            done = 0
+            with open(path, "wb") as f:
+                while True:
+                    if item.get("cancel"):
+                        raise Cancelled()
+                    chunk = resp.read(CHUNK)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    item["done"] = item.get("base_done", 0) + done
+                    if total:
+                        item["total"] = item.get("base_total", 0) + total
+            return path
+
+    def _wget(self, url, dest_dir, item, fallback_name):
+        path = os.path.join(dest_dir, fallback_name)
+        p = subprocess.Popen(["wget", "-q", "-U", UA, "-O", path, url])
+        while p.poll() is None:
+            if item.get("cancel"):
+                p.kill()
+                raise Cancelled()
+            if os.path.exists(path):
+                item["done"] = item.get("base_done", 0) + os.path.getsize(path)
+            time.sleep(0.5)
+        if p.returncode != 0:
+            raise RuntimeError(f"wget failed ({p.returncode})")
+        return path
+
+    @staticmethod
+    def _filename(resp, url):
+        cd = resp.headers.get("Content-Disposition") or ""
+        m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", cd)
+        if m:
+            return os.path.basename(urllib.parse.unquote(m.group(1)))
+        base = os.path.basename(urllib.parse.urlparse(resp.url or url).path)
+        return urllib.parse.unquote(base) if "." in base else None
+
+    # — Google Drive —
+    GD_ID = re.compile(r"(?:/file/d/|[?&]id=)([\w-]{20,})")
+
+    def fetch_gdrive_file(self, url, dest_dir, item, file_id=None):
+        fid = file_id or (self.GD_ID.search(url) and self.GD_ID.search(url).group(1))
+        if not fid:
+            raise RuntimeError("could not parse Google Drive file id")
+        direct = f"https://drive.google.com/uc?export=download&id={fid}"
+        req = urllib.request.Request(direct)
+        with self.opener.open(req, timeout=60) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            if "text/html" not in ctype:
+                # small file: served immediately — stream from this response
+                return self._save_response(resp, direct, dest_dir, item)
+            page = resp.read(1 << 20).decode("utf-8", "replace")
+        # big file: virus-scan interstitial — re-request via the form action
+        # with its hidden inputs (id/export/confirm/uuid)
+        fm = re.search(r'action="([^"]*drive\.usercontent\.google\.com[^"]*)"', page)
+        if not fm:
+            raise RuntimeError("Drive refused the download (quota or permissions)")
+        params = dict(re.findall(
+            r'<input type="hidden" name="([^"]+)" value="([^"]*)"', page))
+        final = fm.group(1) + "?" + urllib.parse.urlencode(params)
+        return self._urllib_stream(final, dest_dir, item, f"{fid}.bin")
+
+    def _save_response(self, resp, url, dest_dir, item):
+        name = self._filename(resp, url) or "gdrive.bin"
+        total = int(resp.headers.get("Content-Length") or 0)
+        path = os.path.join(dest_dir, name)
+        done = 0
+        with open(path, "wb") as f:
+            while True:
+                if item.get("cancel"):
+                    raise Cancelled()
+                chunk = resp.read(CHUNK)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                item["done"] = item.get("base_done", 0) + done
+                if total:
+                    item["total"] = item.get("base_total", 0) + total
+        return path
+
+    def fetch_gdrive_folder(self, url, dest_dir, item):
+        m = re.search(r"/folders/([\w-]+)", url)
+        if not m:
+            raise RuntimeError("could not parse Google Drive folder id")
+        view = f"https://drive.google.com/embeddedfolderview?id={m.group(1)}#list"
+        with self.opener.open(urllib.request.Request(view), timeout=60) as resp:
+            page = resp.read().decode("utf-8", "replace")
+        entries = re.findall(
+            r'href="https://drive\.google\.com/file/d/([\w-]+)[^"]*"[^>]*>.*?'
+            r'flip-entry-title">([^<]+)<', page, re.S)
+        wanted = [(fid, name) for fid, name in entries
+                  if re.search(r"\.(pth|index|zip)$", name, re.I)]
+        if not wanted:
+            raise RuntimeError("no .pth/.index/.zip files visible in Drive folder")
+        paths = []
+        for fid, name in wanted[:8]:
+            item["base_done"] = item.get("done", 0)
+            item["base_total"] = item.get("total", 0)
+            p = self.fetch_gdrive_file("", dest_dir, item, file_id=fid)
+            # keep the listing's filename — Drive's uc endpoint often loses it
+            fixed = os.path.join(dest_dir, os.path.basename(name))
+            if p != fixed:
+                shutil.move(p, fixed)
+                p = fixed
+            paths.append(p)
+        return paths
+
+
+# ── library install ───────────────────────────────────────────────────
+def safe_extract_zip(zpath, dest):
+    with zipfile.ZipFile(zpath) as z:
+        for info in z.infolist():
+            n = info.filename
+            if n.startswith("/") or ".." in n.split("/"):
+                continue
+            if not re.search(r"\.(pth|index)$", n, re.I):
+                continue
+            target = os.path.join(dest, os.path.basename(n))
+            with z.open(info) as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+
+
+def pick_model_files(tmpdir):
+    """RVC zips carry the ~55MB inference .pth plus optional faiss .index;
+    training checkpoints (G_*/D_*, hundreds of MB) must be skipped."""
+    pths, idxs = [], []
+    for root, _, files in os.walk(tmpdir):
+        for f in files:
+            p = os.path.join(root, f)
+            if f.lower().endswith(".pth"):
+                if f.startswith(("G_", "D_")) or os.path.getsize(p) > 400e6:
+                    continue
+                pths.append(p)
+            elif f.lower().endswith(".index"):
+                idxs.append(p)
+    pth = max(pths, key=os.path.getsize) if pths else None
+    idx = None
+    if idxs:
+        added = [i for i in idxs if "added" in os.path.basename(i).lower()]
+        idx = max(added or idxs, key=os.path.getsize)
+    return pth, idx
+
+
+# ── daemon ────────────────────────────────────────────────────────────
+class Voicefetch:
+    def __init__(self):
+        self.ui = UIHub()
+        self.scraper = Scraper()
+        self.dl = Downloader()
+        self.shown = False
+        self.queue = []
+        self.qid = 0
+        self.qlock = threading.Lock()
+        self.qcond = threading.Condition(self.qlock)
+        self.latest_cache = (0, None)
+        os.makedirs(VOICES_DIR, exist_ok=True)
+
+    # — state snapshots —
+    def queue_state(self):
+        with self.qlock:
+            items = [{
+                "qid": it["qid"], "name": it["name"], "state": it["state"],
+                "progress": (round(100 * it["done"] / it["total"])
+                             if it.get("total") else 0),
+                "done_mb": round(it.get("done", 0) / 1e6, 1),
+                "total_mb": round(it.get("total", 0) / 1e6, 1),
+                "error": it.get("error", ""),
+            } for it in self.queue]
+        return {"type": "queue", "items": items}
+
+    def library_state(self):
+        items = []
+        for slug in sorted(os.listdir(VOICES_DIR)):
+            meta_p = os.path.join(VOICES_DIR, slug, "meta.json")
+            pth = os.path.join(VOICES_DIR, slug, "model.pth")
+            if not os.path.exists(meta_p) or not os.path.exists(pth):
+                continue
+            try:
+                meta = json.load(open(meta_p))
+            except Exception:
+                continue
+            items.append({
+                "slug": slug,
+                "name": meta.get("name", slug),
+                "creator": meta.get("creator", ""),
+                "size_mb": round(os.path.getsize(pth) / 1e6, 1),
+                "has_index": os.path.exists(
+                    os.path.join(VOICES_DIR, slug, "model.index")),
+                "added": meta.get("added", ""),
+                "updated": meta.get("updated", ""),
+            })
+        return {"type": "library", "items": items}
+
+    def selected_state(self):
+        slug = ""
+        try:
+            slug = json.load(open(SELECT_FILE)).get("slug", "")
+        except Exception:
+            pass
+        return {"type": "selected", "slug": slug}
+
+    def rvc_state(self):
+        rc = subprocess.run(["siva-rvc", "--check"], capture_output=True).returncode
+        return {"type": "rvc", "ready": rc == 0}
+
+    def push_all(self):
+        for st in (self.queue_state(), self.library_state(),
+                   self.selected_state(), self.rvc_state()):
+            self.ui.send(st)
+
+    def toast(self, text):
+        self.ui.send({"type": "toast", "text": text})
+
+    # — search —
+    def do_search(self, query, page):
+        self.ui.send({"type": "busy", "value": True})
+        try:
+            if not query and page == 1:
+                ts, cached = self.latest_cache
+                if cached and time.time() - ts < 600:
+                    items, pages = cached
+                else:
+                    items, pages = self.scraper.search("", 1)
+                    self.latest_cache = (time.time(), (items, pages))
+            else:
+                items, pages = self.scraper.search(query, page)
+            self.ui.send({"type": "results", "query": query, "page": page,
+                          "pages": pages, "items": items})
+        except Exception as e:
+            log("search error", e)
+            self.toast(f"search failed: {e}")
+        finally:
+            self.ui.send({"type": "busy", "value": False})
+
+    # — download queue —
+    def enqueue(self, res, update=False):
+        with self.qlock:
+            self.qid += 1
+            self.queue.append({
+                "qid": self.qid, "state": "queued", "done": 0, "total": 0,
+                "update": update, **res})
+            self.qcond.notify()
+        self.ui.send(self.queue_state())
+
+    def worker(self):
+        while True:
+            with self.qlock:
+                while not any(i["state"] == "queued" for i in self.queue):
+                    self.qcond.wait()
+                item = next(i for i in self.queue if i["state"] == "queued")
+                item["state"] = "downloading"
+            self.process(item)
+            self.ui.send(self.queue_state())
+            self.ui.send(self.library_state())
+
+    def process(self, item):
+        tmp = f"/tmp/siva-voicefetch-{item['qid']}"
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
+        stop = threading.Event()
+
+        def pulse():
+            while not stop.wait(0.5):
+                self.ui.send(self.queue_state())
+        threading.Thread(target=pulse, daemon=True).start()
+        try:
+            paths = self.dl.fetch(item["url"], tmp, item)
+            item["state"] = "extracting"
+            for p in list(paths):
+                if p.lower().endswith(".zip") or zipfile.is_zipfile(p):
+                    safe_extract_zip(p, tmp)
+            pth, idx = pick_model_files(tmp)
+            if not pth:
+                raise RuntimeError("no usable .pth in download (training-only or wrong format?)")
+            slug = item.get("slug") or slugify(item["name"])
+            if not item.get("update"):
+                base, n = slug, 2
+                while os.path.exists(os.path.join(VOICES_DIR, slug, "meta.json")):
+                    slug, n = f"{base}-{n}", n + 1
+            vdir = os.path.join(VOICES_DIR, slug)
+            os.makedirs(vdir, exist_ok=True)
+            shutil.move(pth, os.path.join(vdir, "model.pth"))
+            if idx:
+                shutil.move(idx, os.path.join(vdir, "model.index"))
+            now = time.strftime("%Y-%m-%d %H:%M")
+            meta_p = os.path.join(vdir, "meta.json")
+            meta = json.load(open(meta_p)) if os.path.exists(meta_p) else {}
+            meta.update({
+                "name": item["name"], "slug": slug,
+                "creator": item.get("creator", ""),
+                "source_url": item["url"],
+                "model_page": (SITE + "/model/" + item["id"]) if item.get("id") else "",
+                "remote_bytes": item.get("total", 0),
+                "added": meta.get("added", now), "updated": now,
+            })
+            json.dump(meta, open(meta_p, "w"), indent=2)
+            item["state"] = "done"
+            self.toast(("updated: " if item.get("update") else "installed: ") + slug)
+        except Cancelled:
+            item["state"] = "cancelled"
+        except Exception as e:
+            log("download error", item["name"], e)
+            item["state"] = "error"
+            item["error"] = str(e)[:160]
+        finally:
+            stop.set()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # — updates —
+    def check_updates(self, announce=True):
+        """Compare remote Content-Length against what we downloaded; a
+        changed size on the source means the model was re-uploaded."""
+        queued = 0
+        for it in self.library_state()["items"]:
+            meta_p = os.path.join(VOICES_DIR, it["slug"], "meta.json")
+            try:
+                meta = json.load(open(meta_p))
+            except Exception:
+                continue
+            url, known = meta.get("source_url", ""), meta.get("remote_bytes", 0)
+            if classify_url(url) != "huggingface" or not known:
+                continue
+            try:
+                req = urllib.request.Request(url, method="HEAD")
+                with self.dl.opener.open(req, timeout=30) as resp:
+                    remote = int(resp.headers.get("Content-Length") or 0)
+            except Exception:
+                continue
+            if remote and abs(remote - known) > 1024:
+                self.enqueue({"id": "", "name": meta["name"],
+                              "creator": meta.get("creator", ""),
+                              "url": url, "slug": it["slug"]}, update=True)
+                queued += 1
+        if announce:
+            self.toast(f"update check: {queued} model(s) changed upstream"
+                       if queued else "update check: library up to date")
+
+    def update_loop(self):
+        while True:
+            time.sleep(UPDATE_PERIOD)
+            try:
+                self.check_updates(announce=False)
+            except Exception as e:
+                log("update loop error", e)
+
+    # — selection / preview —
+    def select(self, slug):
+        if not slug:
+            try:
+                os.unlink(SELECT_FILE)
+            except FileNotFoundError:
+                pass
+            self.toast("SIVA voice: piper default")
+        else:
+            vdir = os.path.join(VOICES_DIR, slug)
+            if not os.path.exists(os.path.join(vdir, "model.pth")):
+                self.toast(f"voice not found: {slug}")
+                return
+            meta = {}
+            try:
+                meta = json.load(open(os.path.join(vdir, "meta.json")))
+            except Exception:
+                pass
+            json.dump({
+                "slug": slug, "name": meta.get("name", slug),
+                "pth": os.path.join(vdir, "model.pth"),
+                "index": (os.path.join(vdir, "model.index")
+                          if os.path.exists(os.path.join(vdir, "model.index")) else ""),
+            }, open(SELECT_FILE, "w"), indent=2)
+            self.toast(f"SIVA voice: {meta.get('name', slug)}")
+        self.ui.send(self.selected_state())
+
+    def preview(self, slug):
+        def run():
+            wav, out = "/tmp/siva-vf-preview.wav", "/tmp/siva-vf-preview-rvc.wav"
+            piper = shutil.which("piper") or shutil.which("piper-tts")
+            if not piper or not os.path.exists(PIPER_VOICE):
+                self.toast("piper TTS not available")
+                return
+            # speak the character's own name — strip the [RVC v2][N Epochs]
+            # style tags and any (parenthetical) source credits for TTS
+            name = slug
+            try:
+                meta = json.load(open(os.path.join(VOICES_DIR, slug, "meta.json")))
+                name = re.sub(r"\[.*?\]|\(.*?\)", "", meta.get("name", slug))
+                name = re.sub(r"\s+", " ", name).strip(" -–") or slug
+            except Exception:
+                pass
+            text = PREVIEW_TEXT.format(name=name)
+            p = subprocess.run([piper, "-m", PIPER_VOICE, "-f", wav],
+                               input=text.encode(), capture_output=True,
+                               timeout=30)
+            if p.returncode != 0:
+                self.toast("piper synthesis failed")
+                return
+            play = wav
+            r = subprocess.run(["siva-rvc", "--voice", slug, wav, out],
+                               capture_output=True, timeout=180)
+            if r.returncode == 0:
+                play = out
+            else:
+                self.toast("RVC engine not ready — playing plain TTS")
+            subprocess.run(["pw-play", play], timeout=60)
+        threading.Thread(target=run, daemon=True).start()
+
+    # — input events —
+    def handle(self, msg):
+        t = msg.get("type")
+        if t == "toggle":
+            self.shown = not self.shown
+            self.ui.send({"type": "show" if self.shown else "hide"})
+            if self.shown:
+                self.push_all()
+                threading.Thread(target=self.do_search, args=("", 1),
+                                 daemon=True).start()
+        elif t == "hide":
+            self.shown = False
+            self.ui.send({"type": "hide"})
+        elif t == "search":
+            threading.Thread(target=self.do_search,
+                             args=(msg.get("query", "").strip(),
+                                   int(msg.get("page", 1))),
+                             daemon=True).start()
+        elif t == "download" and msg.get("item", {}).get("url"):
+            self.enqueue(msg["item"])
+        elif t == "cancel":
+            with self.qlock:
+                for it in self.queue:
+                    if it["qid"] == msg.get("qid"):
+                        it["cancel"] = True
+                        if it["state"] == "queued":
+                            it["state"] = "cancelled"
+            self.ui.send(self.queue_state())
+        elif t == "remove":
+            slug = os.path.basename(msg.get("slug", ""))
+            if slug:
+                shutil.rmtree(os.path.join(VOICES_DIR, slug), ignore_errors=True)
+                if self.selected_state()["slug"] == slug:
+                    self.select("")
+                self.ui.send(self.library_state())
+        elif t == "select":
+            self.select(os.path.basename(msg.get("slug", "")))
+        elif t == "preview":
+            self.preview(os.path.basename(msg.get("slug", "")))
+        elif t == "check_updates":
+            threading.Thread(target=self.check_updates, daemon=True).start()
+        elif t == "refresh":
+            self.push_all()
+
+    # — socket plumbing —
+    def client_loop(self, conn):
+        self.ui.add(conn)
+        try:
+            conn.sendall((json.dumps(
+                {"type": "show" if self.shown else "hide"}) + "\n").encode())
+        except OSError:
+            return  # probe clients (the F7 script) disconnect immediately
+        f = conn.makefile("r")
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.handle(json.loads(line))
+            except Exception as e:
+                log("bad client msg", line[:200], e)
+
+    def heartbeat(self):
+        # quickshell's Socket.connected is a desired-state flag; the UI
+        # detects a dead link by these pings going quiet
+        while True:
+            self.ui.send({"type": "ping"})
+            time.sleep(3)
+
+    def serve(self):
+        try:
+            os.unlink(SOCK_PATH)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(SOCK_PATH)
+        os.chmod(SOCK_PATH, 0o666)
+        srv.listen(8)
+        log("SIVA Voicefetch daemon listening on", SOCK_PATH)
+        threading.Thread(target=self.worker, daemon=True).start()
+        threading.Thread(target=self.heartbeat, daemon=True).start()
+        threading.Thread(target=self.update_loop, daemon=True).start()
+        while True:
+            conn, _ = srv.accept()
+            threading.Thread(target=self.client_loop, args=(conn,),
+                             daemon=True).start()
+
+
+if __name__ == "__main__":
+    # Singleton guard: if another instance already holds the lock, exit
+    # quietly. Prevents the toggle-script respawn path from stacking
+    # daemons that steal each other's socket via unlink+rebind.
+    import fcntl
+    _singleton_lock = open("/tmp/siva-voicefetch-daemon.lock", "w")
+    try:
+        fcntl.flock(_singleton_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(0)
+    Voicefetch().serve()

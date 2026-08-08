@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""SIVA-Type daemon — AI-enhanced voice typing with personality.
+
+F10 toggles dictation: the user speaks a rough draft, whisper transcribes it,
+the local LLM rewrites it in the selected personality (professional / nerdy /
+intelligent) with its reasoning streamed live to the overlay, and the final
+text is typed into the focused input via wtype. Stdlib only.
+
+Protocol, daemon -> UI (one JSON object per line):
+  {"type":"show"} / {"type":"hide"}
+  {"type":"status","value":"idle|listening|thinking|typing|error"}
+  {"type":"style","value":"professional|nerdy|intelligent"}
+  {"type":"mic","device":"..."}
+  {"type":"transcript","text":"..."}      raw dictation after STT
+  {"type":"cot","text":"..."}             chain-of-thought delta (append)
+  {"type":"cot_clear"}
+  {"type":"reply","text":"..."}           rewritten-text delta (append)
+  {"type":"reply_clear"}
+  {"type":"error","text":"..."}
+
+UI/keybind -> daemon:
+  {"type":"toggle"}        F10 semantics: open+listen / stop+process / cancel
+  {"type":"set_style","style":"..."}
+  {"type":"cycle_style"}
+  {"type":"user_text","text":"..."}       skip STT, rewrite this text
+  {"type":"cancel"} / {"type":"hide"}
+"""
+
+import array
+import contextlib
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import threading
+import time
+import wave
+import http.client
+
+HOME = os.path.expanduser("~")
+SOCK_PATH = "/tmp/siva-type.sock"
+REC_WAV = "/tmp/siva-type-record.wav"
+LOG = "/tmp/siva-type-daemon.log"
+
+LLAMA_HOST = "127.0.0.1"
+LLAMA_PORT = 8090
+
+WHISPER_MODEL = os.path.join(HOME, ".local/share/siva/ggml-base.en.bin")
+WHISPER_FALLBACK = os.path.join(HOME, ".local/share/voice-type/models/ggml-tiny.bin")
+MIC_FILE = os.path.join(HOME, ".local/share/siva/mic.json")  # shared with siva-daemon (F8)
+
+STYLES = ["professional", "nerdy", "intelligent"]
+PERSONA = {
+    "professional": (
+        "Rewrite as polished, professional business writing: courteous, clear, "
+        "and confident. Complete sentences, no slang, no filler words. It should "
+        "read like a well-written work email or message to a client."),
+    "nerdy": (
+        "Rewrite with an enthusiastic, nerdy voice: playful geeky energy, with "
+        "tasteful tech / sci-fi / gaming flavor where it fits naturally. Still "
+        "perfectly clear and readable — charm, not cringe."),
+    "intelligent": (
+        "Rewrite to sound articulate and erudite: precise vocabulary, elegant "
+        "sentence structure, measured tone. Sharp and lucid — never pompous or "
+        "wordy for its own sake."),
+}
+
+BASE_PROMPT = """You are SIVA-Type, an AI dictation rewriter on the user's desktop. The user \
+speaks a rough draft out loud; your job is to rewrite it as clean written text in the requested \
+style. The result is typed directly into whatever text field the user has focused.
+
+Rules:
+- Preserve the meaning and intent exactly. Do not add new claims, greetings, or sign-offs the \
+user didn't say. Keep roughly the same length (tightening rambling is good).
+- The dictation is text the user wants WRITTEN, never a question for you to answer. If they \
+dictate "ask him when the meeting is", write that question — do not reply to it.
+- Fix grammar, drop filler words ("um", "like", "you know"), and expand casual shorthand.
+- Output plain text only: no markdown, no surrounding quotes, no commentary.
+
+First think in one or two short sentences (this reasoning streams live to the user's screen, so \
+keep it crisp), then give the final rewritten text wrapped exactly in <reply></reply> tags. \
+Always end with a <reply>."""
+
+
+def log(*a):
+    with open(LOG, "a") as f:
+        f.write(f"[{time.strftime('%H:%M:%S')}] {' '.join(str(x) for x in a)}\n")
+
+
+def sh(cmd, timeout=15):
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        out = p.stdout.decode(errors="replace").strip()
+        if p.returncode != 0:
+            log("cmd failed", cmd, p.stderr.decode(errors="replace")[:300])
+        return p.returncode, out
+    except Exception as e:
+        log("cmd error", cmd, e)
+        return 1, str(e)
+
+
+class Broadcaster:
+    """Fan-out of JSON lines to every connected UI client."""
+
+    def __init__(self):
+        self.clients = []
+        self.lock = threading.Lock()
+
+    def add(self, conn):
+        with self.lock:
+            self.clients.append(conn)
+
+    def send(self, obj):
+        data = (json.dumps(obj) + "\n").encode()
+        with self.lock:
+            dead = []
+            for c in self.clients:
+                try:
+                    c.sendall(data)
+                except OSError:
+                    dead.append(c)
+            for c in dead:
+                self.clients.remove(c)
+
+
+class SivaType:
+    def __init__(self):
+        self.ui = Broadcaster()
+        self.state = "idle"
+        self.style = "professional"
+        self.rec_proc = None
+        self.rec_lock = threading.Lock()
+        self.mic_target = None
+        self.saved_sink_vol = None
+        self.cancel_flag = threading.Event()
+        self.turn_lock = threading.Lock()
+        self.hide_timer = None
+
+    # ── state / UI helpers ────────────────────────────────────────────
+    def set_state(self, s):
+        self.state = s
+        self.ui.send({"type": "status", "value": s})
+        log("state ->", s)
+
+    def error(self, text):
+        log("ERROR:", text)
+        self.ui.send({"type": "error", "text": text})
+        self.set_state("idle")
+        self._schedule_hide(6.0)
+
+    def _schedule_hide(self, delay=4.0):
+        self._cancel_hide()
+        self.hide_timer = threading.Timer(
+            delay, lambda: self.ui.send({"type": "hide"}))
+        self.hide_timer.daemon = True
+        self.hide_timer.start()
+
+    def _cancel_hide(self):
+        if self.hide_timer:
+            self.hide_timer.cancel()
+            self.hide_timer = None
+
+    # ── audio (same battle-tested path as siva-daemon) ────────────────
+    def list_sources(self):
+        """All selectable audio inputs as [{id, name}] — hardware Sources
+        plus filter-chain / loopback Audio/Source nodes, and a synthetic
+        'System default' entry. Mirrors siva-daemon's picker."""
+        _, out = sh(["wpctl", "status"])
+        sources = [{"id": "", "name": "System default"}]
+        section = None
+        for line in out.splitlines():
+            if "Sources:" in line:
+                section = "sources"; continue
+            if "Filters:" in line:
+                section = "filters"; continue
+            if any(h in line for h in ("Sinks:", "Devices:", "Streams:")):
+                section = None; continue
+            if section == "sources":
+                m = re.search(r"(\d+)\.\s+(.+?)\s*\[vol", line)
+                if m:
+                    sources.append({"id": m.group(1), "name": m.group(2).strip()})
+            elif section == "filters":
+                m = re.search(r"(\d+)\.\s+(\S.*?)\s+\[Audio/Source\]", line)
+                if m:
+                    sources.append({"id": m.group(1), "name": m.group(2).strip()})
+        return sources
+
+    def find_mic(self):
+        """Honor the input chosen in SIVA's mic selector (~/.local/share/
+        siva/mic.json, matched by name), else auto-detect a Scarlett/
+        Focusrite, else fall back to the PipeWire default."""
+        sources = self.list_sources()
+        try:
+            with open(MIC_FILE) as f:
+                saved = json.load(f).get("name", "")
+        except Exception:
+            saved = ""
+        if saved == "System default":
+            return None, "System default"
+        if saved:
+            for s in sources:
+                if s["name"] == saved:
+                    return s["id"], s["name"]
+        for s in sources:
+            if s["id"] and re.search(r"scarlett|focusrite", s["name"], re.I):
+                return s["id"], s["name"]
+        return None, "default source"
+
+    def wav_is_silent(self, wav):
+        """True if the capture never rises above the noise floor —
+        whisper hallucinates words like "you" on silent input."""
+        try:
+            with contextlib.closing(wave.open(wav, "rb")) as w:
+                frames = w.readframes(w.getnframes())
+            samples = array.array("h", frames[: len(frames) // 2 * 2])
+            return not samples or max(abs(s) for s in samples) < 300
+        except Exception:
+            return False
+
+    def _duck_audio(self):
+        rc, out = sh(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+        m = re.search(r"Volume:\s*([\d.]+)", out)
+        if rc == 0 and m and self.saved_sink_vol is None:
+            self.saved_sink_vol = m.group(1)
+            sh(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@",
+                f"{float(m.group(1)) * 0.5:.2f}"])
+
+    def _unduck_audio(self):
+        vol, self.saved_sink_vol = self.saved_sink_vol, None
+        if vol is not None:
+            sh(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", vol])
+
+    def _spawn_rec(self):
+        cmd = ["pw-record", "--format", "s16", "--rate", "16000", "--channels", "1", REC_WAV]
+        if self.mic_target:
+            cmd = ["pw-record", "--target", self.mic_target, "--format", "s16",
+                   "--rate", "16000", "--channels", "1", REC_WAV]
+        return subprocess.Popen(cmd)
+
+    def _watch_capture(self, proc):
+        """pw-record occasionally attaches to a dead capture stream that only
+        delivers zeros; bounce the recorder if the first second is silence."""
+        for _ in range(2):
+            time.sleep(1.2)
+            with self.rec_lock:
+                if self.rec_proc is not proc or proc.poll() is not None:
+                    return
+            try:
+                with open(REC_WAV, "rb") as f:
+                    data = f.read(65536)[44:]  # skip WAV header
+            except OSError:
+                data = b""
+            samples = array.array("h", data[: len(data) // 2 * 2])
+            if samples and any(samples):
+                return
+            with self.rec_lock:
+                if self.rec_proc is not proc:
+                    return
+                log("capture stream dead (all zeros) — bouncing pw-record")
+                proc.send_signal(signal.SIGINT)
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                proc = self.rec_proc = self._spawn_rec()
+
+    def start_recording(self):
+        tid, name = self.find_mic()
+        self.mic_target = tid
+        self.ui.send({"type": "mic", "device": name})
+        try:
+            os.unlink(REC_WAV)
+        except FileNotFoundError:
+            pass
+        self._duck_audio()
+        with self.rec_lock:
+            self.rec_proc = self._spawn_rec()
+        threading.Thread(target=self._watch_capture, args=(self.rec_proc,),
+                         daemon=True).start()
+        self.set_state("listening")
+
+    def stop_recording(self):
+        self._unduck_audio()
+        with self.rec_lock:
+            p, self.rec_proc = self.rec_proc, None
+        if not p:
+            return None
+        p.send_signal(signal.SIGINT)
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            p.terminate()
+            p.wait(timeout=2)
+        if not (os.path.exists(REC_WAV) and os.path.getsize(REC_WAV) > 8000):
+            return None
+        return REC_WAV
+
+    def transcribe(self, wav):
+        model = WHISPER_MODEL if os.path.exists(WHISPER_MODEL) else WHISPER_FALLBACK
+        if not os.path.exists(model):
+            self.error("No whisper model found")
+            return None
+        rc, out = sh(["whisper-cli", "-m", model, "-f", wav, "-l", "en", "-np", "-nt"],
+                     timeout=60)
+        if rc != 0:
+            return None
+        text = " ".join(l.strip() for l in out.splitlines()
+                        if l.strip() and not l.startswith("["))
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or None
+
+    # ── llama.cpp streaming (CoT / <reply> routing, no tools) ─────────
+    def llm_stream(self, messages):
+        body = json.dumps({
+            "model": "siva-type", "stream": True, "messages": messages,
+            "temperature": 0.7, "max_tokens": 1536,
+        })
+        conn = http.client.HTTPConnection(LLAMA_HOST, LLAMA_PORT, timeout=300)
+        conn.request("POST", "/v1/chat/completions", body,
+                     {"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise RuntimeError(f"llama-server HTTP {resp.status}: {resp.read()[:200]}")
+
+        content = ""
+        pending = ""      # holdback buffer for tag detection
+        in_reply = False
+
+        def route(txt):
+            nonlocal pending, in_reply
+            pending += txt
+            while True:
+                if in_reply:
+                    idx = pending.find("</reply>")
+                    if idx >= 0:
+                        if idx:
+                            self.ui.send({"type": "reply", "text": pending[:idx]})
+                        pending = pending[idx + len("</reply>"):]
+                        in_reply = False
+                        continue
+                    keep = 0
+                    for k in range(min(len("</reply>") - 1, len(pending)), 0, -1):
+                        if "</reply>".startswith(pending[-k:]):
+                            keep = k
+                            break
+                    emit = pending[:len(pending) - keep]
+                    if emit:
+                        self.ui.send({"type": "reply", "text": emit})
+                    pending = pending[len(pending) - keep:]
+                    return
+                idx = pending.find("<reply>")
+                if idx >= 0:
+                    if pending[:idx].strip():
+                        self.ui.send({"type": "cot", "text": pending[:idx]})
+                    pending = pending[idx + len("<reply>"):]
+                    in_reply = True
+                    continue
+                keep = 0
+                for k in range(min(len("<reply>") - 1, len(pending)), 0, -1):
+                    if "<reply>".startswith(pending[-k:]):
+                        keep = k
+                        break
+                emit = pending[:len(pending) - keep]
+                if emit:
+                    self.ui.send({"type": "cot", "text": emit})
+                pending = pending[len(pending) - keep:]
+                return
+
+        buf = b""
+        while True:
+            if self.cancel_flag.is_set():
+                conn.close()
+                raise InterruptedError
+            chunk = resp.read1(65536)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line.startswith(b"data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == b"[DONE]":
+                    buf = b""
+                    break
+                try:
+                    delta = json.loads(payload)["choices"][0]["delta"]
+                except (KeyError, IndexError, json.JSONDecodeError):
+                    continue
+                if delta.get("reasoning_content"):
+                    self.ui.send({"type": "cot", "text": delta["reasoning_content"]})
+                if delta.get("content"):
+                    content += delta["content"]
+                    route(delta["content"])
+        if pending.strip():
+            self.ui.send({"type": "reply" if in_reply else "cot", "text": pending})
+        conn.close()
+        return content
+
+    # ── rewrite turn ──────────────────────────────────────────────────
+    def rewrite_turn(self, raw_text):
+        if not self.turn_lock.acquire(blocking=False):
+            return
+        try:
+            self.cancel_flag.clear()
+            self._cancel_hide()
+            self.ui.send({"type": "transcript", "text": raw_text})
+            self.ui.send({"type": "cot_clear"})
+            self.ui.send({"type": "reply_clear"})
+            self.set_state("thinking")
+
+            messages = [
+                {"role": "system",
+                 "content": BASE_PROMPT + "\n\nRequested style: "
+                            + self.style + ". " + PERSONA[self.style]},
+                {"role": "user", "content": raw_text},
+            ]
+            content = self.llm_stream(messages)
+
+            m = re.search(r"<reply>(.*?)(?:</reply>|$)", content, re.S)
+            if m:
+                final = m.group(1).strip()
+            else:
+                # model skipped the tag protocol; salvage the full content
+                final = re.sub(r"<[^>]+>", "", content).strip()
+                if final:
+                    self.ui.send({"type": "reply", "text": final})
+            if not final:
+                self.error("model produced no text")
+                return
+
+            self.set_state("typing")
+            log("typing", repr(final[:120]))
+            p = subprocess.run(["wtype", "-"], input=final.encode(),
+                               capture_output=True, timeout=30)
+            if p.returncode != 0:
+                self.error("wtype failed: " + p.stderr.decode(errors="replace")[:200])
+                return
+            self.set_state("idle")
+            self._schedule_hide(4.0)
+        except InterruptedError:
+            self.ui.send({"type": "cot", "text": "\n[cancelled]"})
+            self.set_state("idle")
+            self._schedule_hide(2.0)
+        except Exception as e:
+            self.error(f"{type(e).__name__}: {e}")
+        finally:
+            self.turn_lock.release()
+
+    # ── input events ──────────────────────────────────────────────────
+    def on_toggle(self):
+        if self.state == "idle":
+            self._cancel_hide()
+            self.ui.send({"type": "show"})
+            self.start_recording()
+        elif self.state == "listening":
+            self.set_state("thinking")
+            wav = self.stop_recording()
+            if wav and self.wav_is_silent(wav):
+                self.ui.send({"type": "cot",
+                              "text": f"[mic captured silence — check input '{self.mic_target or 'default'}']"})
+                self.set_state("idle")
+                self._schedule_hide(4.0)
+                return
+            text = self.transcribe(wav) if wav else None
+            if not text:
+                self.ui.send({"type": "cot", "text": "[heard nothing]"})
+                self.set_state("idle")
+                self._schedule_hide(4.0)
+                return
+            threading.Thread(target=self.rewrite_turn, args=(text,), daemon=True).start()
+        else:
+            self.cancel_flag.set()
+
+    def set_style(self, style):
+        if style in STYLES:
+            self.style = style
+            self.ui.send({"type": "style", "value": style})
+            log("style ->", style)
+
+    def handle(self, msg):
+        t = msg.get("type")
+        if t == "toggle":
+            self.on_toggle()
+        elif t == "set_style":
+            self.set_style(msg.get("style", ""))
+        elif t == "cycle_style":
+            self.set_style(STYLES[(STYLES.index(self.style) + 1) % len(STYLES)])
+        elif t == "user_text" and msg.get("text", "").strip():
+            if self.state == "listening":
+                self.stop_recording()
+            if self.state in ("idle", "listening"):
+                self.ui.send({"type": "show"})
+                threading.Thread(target=self.rewrite_turn,
+                                 args=(msg["text"].strip(),), daemon=True).start()
+        elif t == "cancel":
+            if self.state == "listening":
+                self.stop_recording()
+                self.set_state("idle")
+            else:
+                self.cancel_flag.set()
+        elif t == "hide":
+            if self.state == "listening":
+                self.stop_recording()
+            self.cancel_flag.set()
+            self.set_state("idle")
+            self.ui.send({"type": "hide"})
+
+    # ── socket server ─────────────────────────────────────────────────
+    def client_loop(self, conn):
+        self.ui.add(conn)
+        try:
+            conn.sendall((json.dumps({"type": "status", "value": self.state}) + "\n"
+                          + json.dumps({"type": "style", "value": self.style}) + "\n").encode())
+        except OSError:
+            return  # probe clients (the F10 script) disconnect immediately
+        f = conn.makefile("r")
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.handle(json.loads(line))
+            except Exception as e:
+                log("bad client msg", line[:200], e)
+
+    def heartbeat(self):
+        while True:
+            self.ui.send({"type": "ping"})
+            time.sleep(3)
+
+    def serve(self):
+        try:
+            os.unlink(SOCK_PATH)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(SOCK_PATH)
+        os.chmod(SOCK_PATH, 0o666)
+        srv.listen(8)
+        log("SIVA-Type daemon listening on", SOCK_PATH)
+        threading.Thread(target=self.heartbeat, daemon=True).start()
+        while True:
+            conn, _ = srv.accept()
+            threading.Thread(target=self.client_loop, args=(conn,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    # Singleton guard: if another instance already holds the lock, exit
+    # quietly. Prevents the toggle-script respawn path from stacking
+    # daemons that steal each other's socket via unlink+rebind.
+    import fcntl
+    _singleton_lock = open("/tmp/siva-type-daemon.lock", "w")
+    try:
+        fcntl.flock(_singleton_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(0)
+    SivaType().serve()

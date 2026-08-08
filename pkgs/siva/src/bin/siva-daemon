@@ -1,0 +1,1854 @@
+#!/usr/bin/env python3
+"""SIVA orchestrator daemon.
+
+Bridges the quickshell overlay (unix socket, newline-JSON), audio capture
+(pw-record + whisper.cpp), the llama.cpp server (OpenAI-compatible streaming
+API with tools), desktop control (niri msg / ydotool / wtype / grim), and
+TTS (piper). Stdlib only.
+
+Protocol, daemon -> UI (one JSON object per line):
+  {"type":"show"} / {"type":"hide"}
+  {"type":"status","value":"idle|listening|thinking|executing|speaking|error"}
+  {"type":"mic","device":"..."}
+  {"type":"transcript","text":"..."}      user's words after STT
+  {"type":"cot","text":"..."}             chain-of-thought delta (append)
+  {"type":"cot_clear"}
+  {"type":"tool","text":"..."}            human-readable tool execution line
+  {"type":"reply","text":"..."}           final-answer delta (append)
+  {"type":"reply_clear"}
+  {"type":"error","text":"..."}
+
+UI/keybind -> daemon:
+  {"type":"toggle"}        F8 semantics: open+listen / stop+process / cancel
+  {"type":"user_text","text":"..."}
+  {"type":"cancel"}
+  {"type":"hide"}
+"""
+
+import array
+import base64
+import contextlib
+import json
+import os
+import queue
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import threading
+import time
+import wave
+import html as htmllib
+import http.client
+import urllib.error
+import urllib.parse
+import urllib.request
+
+HOME = os.path.expanduser("~")
+SOCK_PATH = "/tmp/siva.sock"
+REC_WAV = "/tmp/siva-record.wav"
+LOG = "/tmp/siva-daemon.log"
+
+LLAMA_HOST = "127.0.0.1"
+LLAMA_PORT = 8090
+MAX_TOOL_ROUNDS = 8
+# The llama server runs at a small fixed context (VRAM headroom on the 4090 —
+# see siva-llm). The system prompt + tool schemas already eat ~3.3k of it, so
+# the agent loop trims old conversation turns to fit and never overflows.
+LLAMA_CTX = int(os.environ.get("SIVA_LLAMA_CTX", "4096"))
+CTX_REPLY_RESERVE = 640   # tokens kept free for the model's reasoning + reply
+
+# ── Durable memory (MemPalace) ────────────────────────────────────────────
+# SIVA gets long-term, cross-session memory from MemPalace (https://github.com/
+# MemPalace/mempalace): a local-first AI memory store. We talk to a long-lived
+# `mempalace-mcp` subprocess over its MCP stdio transport — newline-delimited
+# JSON-RPC, the exact framing SIVA already speaks on its own UI socket — so the
+# ~300 MB embedding model loads once and stays warm. The model files "drawers"
+# it can search later via the remember/recall tools, and every turn is silently
+# seeded with relevant past memories (auto-recall).
+#
+# Entirely optional and fail-soft: if `mempalace-mcp` is not installed the
+# feature disables itself and SIVA behaves exactly as before. Install with
+# `uv tool install mempalace` (or pipx/pip).
+MEMPALACE_BIN = os.environ.get("SIVA_MEMPALACE_BIN", "mempalace-mcp")
+MEMPALACE_PALACE = os.environ.get("SIVA_PALACE", "")   # "" => mempalace default (~/.mempalace/palace)
+# NixOS + nix-ld: stable location of the nix-ld shared libs, used as a fallback
+# when NIX_LD_LIBRARY_PATH isn't in the daemon's own environment (see _spawn).
+NIX_LD_LIB_FALLBACK = "/run/current-system/sw/share/nix-ld/lib"
+MEMORY_WING = os.environ.get("SIVA_MEMORY_WING", "user")  # wing SIVA files its own memories under
+MEMORY_AUTORECALL = os.environ.get("SIVA_MEMORY_AUTORECALL", "1").lower() not in ("0", "false", "no")
+
+# ── Web search (local SearXNG) ────────────────────────────────────────────
+# SIVA can retrieve live web results through the user's own SearXNG metasearch
+# instance (private, localhost-only, no API keys). The web_search tool queries
+# its JSON API for the top hits and pulls readable text from the leading pages,
+# so the model reasons over real fetched content — a small local RAG loop.
+# Fail-soft: if SearXNG is unreachable the tool returns an error and SIVA
+# carries on. Point elsewhere with SIVA_SEARXNG.
+SEARXNG_URL = os.environ.get("SIVA_SEARXNG", "http://127.0.0.1:8888").rstrip("/")
+# The llama server runs at a deliberately small 4096-token context (VRAM
+# headroom on the 4090 — see siva-llm), so the web_search payload must stay
+# lean or the follow-up completion overflows. Keep snippets short and fetch
+# just the top page's gist.
+WEB_FETCH_PAGES = 1       # how many top results to fetch full text from
+WEB_FETCH_CHARS = 700     # per-page text budget handed to the model
+WEB_SNIPPET_CHARS = 200   # per-result snippet budget
+WEB_UA = "Mozilla/5.0 (X11; Linux x86_64) SIVA/1.0"
+
+# ── Social mode (hands-free conversation) ─────────────────────────────────
+# A continuous, low-latency chat loop entered by saying "activate social mode".
+# It endpoints speech itself (energy VAD — no push-to-talk), runs a fast
+# tool-free completion, and streams the reply to TTS sentence by sentence, so
+# it feels like just talking. Tunable via env for different mics/rooms.
+CONV_ONSET = int(os.environ.get("SIVA_VAD_ONSET", "600"))     # |sample| that counts as speech starting
+CONV_SILENCE = int(os.environ.get("SIVA_VAD_SILENCE", "350"))  # below this is silence
+CONV_END_SIL = float(os.environ.get("SIVA_VAD_ENDSIL", "0.7"))  # trailing silence (s) that ends a turn
+CONV_MAX_UTT = float(os.environ.get("SIVA_VAD_MAXUTT", "20"))   # hard cap on one utterance (s)
+CONV_WAIT = float(os.environ.get("SIVA_VAD_WAIT", "12"))        # give up waiting for speech after (s)
+
+WHISPER_MODEL = os.path.join(HOME, ".local/share/siva/ggml-base.en.bin")
+WHISPER_FALLBACK = os.path.join(HOME, ".local/share/voice-type/models/ggml-tiny.bin")
+PIPER_VOICE = os.path.join(HOME, ".local/share/siva/piper/en_US-lessac-medium.onnx")
+MIC_FILE = os.path.join(HOME, ".local/share/siva/mic.json")  # persisted input choice
+YDOTOOL_ENV = {**os.environ, "YDOTOOL_SOCKET": os.environ.get("YDOTOOL_SOCKET", "/run/ydotoold/socket")}
+
+# Physical monitor layout (side-by-side ultrawides). Absolute desktop pixel
+# space spans both: DP-1 is x 0..3439, DP-2 is x 3440..6879. Used to map a
+# per-monitor OCR hit or the live stream feed back into global coordinates.
+MONITORS = {
+    "DP-1": {"x": 0,    "y": 0, "w": 3440, "h": 1440, "label": "Alienware"},
+    "DP-2": {"x": 3440, "y": 0, "w": 3440, "h": 1440, "label": "ASUS"},
+}
+STREAM_DIR = "/tmp/siva-stream"          # live dual-monitor frames for Stream.qml
+OCR_MIN_CONF = 40                        # tesseract word confidence floor
+# tools that actually manipulate the desktop (vs. just look at it) — used to
+# decide when SIVA has gone "agentic" and the live Stream overlay should show
+ACTION_TOOLS = {"click", "click_text", "move_cursor", "scroll", "type_text",
+                "press_key", "switch_window", "focus_window", "focus_workspace",
+                "spawn_app", "game_control"}
+
+# Linux evdev key codes (input-event-codes.h) for ydotool's `key <code>:<state>`.
+# ydotool injects at the uinput level, so — unlike wtype's Wayland virtual
+# keyboard — games (Minecraft, shooters, anything on raw input / XWayland)
+# actually receive these. Used by game_control for WASD movement, key holds, etc.
+KEYCODES = {
+    "a": 30, "b": 48, "c": 46, "d": 32, "e": 18, "f": 33, "g": 34, "h": 35,
+    "i": 23, "j": 36, "k": 37, "l": 38, "m": 50, "n": 49, "o": 24, "p": 25,
+    "q": 16, "r": 19, "s": 31, "t": 20, "u": 22, "v": 47, "w": 17, "x": 45,
+    "y": 21, "z": 44,
+    "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10, "0": 11,
+    "space": 57, "enter": 28, "return": 28, "esc": 1, "escape": 1, "tab": 15,
+    "backspace": 14, "shift": 42, "lshift": 42, "rshift": 54, "ctrl": 29,
+    "lctrl": 29, "rctrl": 97, "alt": 56, "lalt": 56, "ralt": 100, "capslock": 58,
+    "up": 103, "down": 108, "left": 105, "right": 106,
+    "f1": 59, "f2": 60, "f3": 61, "f4": 62, "f5": 63, "f6": 64, "f7": 65,
+    "f8": 66, "f9": 67, "f10": 68, "f11": 87, "f12": 88,
+    "minus": 12, "equal": 13, "grave": 41, "tilde": 41,
+}
+# ydotool click button flags: 0x40 = press-only, 0x80 = release-only, low bits
+# select the button (0 left, 1 right, 2 middle); 0xC0 = a full left click.
+MOUSE_DN = {"left": "0x40", "right": "0x41", "middle": "0x42"}
+MOUSE_UP = {"left": "0x80", "right": "0x81", "middle": "0x82"}
+MOUSE_CLICK = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}
+
+SYSTEM_PROMPT = """You are SIVA (Super Intelligent Voice Assistant), a friendly, sharp voice \
+assistant on the user's NixOS desktop (niri, Wayland, dual 3440x1440 monitors side by side: DP-1 \
+x=0..3439 left/Alienware, DP-2 x=3440..6879 right/ASUS; y=0..1439).
+
+You can SEE the screen (screenshot / vision_loop) and ACT on it (cursor, clicks, typing, windows). \
+For anything about the current screen, screenshot FIRST, look, then act; for multi-step UI tasks \
+re-capture between steps to verify. To reach a specific window, use list_windows then focus_window \
+by id (reliable); only arrow with switch_window if it's not listed. Never fabricate screen content \
+you haven't observed.
+
+CLICKING — you're bad at guessing pixels, so DON'T lead with move_cursor. Prefer click_text: name \
+the visible text (button, link, menu item, field placeholder) and OCR clicks it. Use move_cursor + \
+click only for targets with no readable text (icons, canvas); coordinates are absolute desktop \
+pixels. To open apps/URLs, spawn_app or focus the address bar and type rather than hunting for \
+icons. If a click didn't work, don't repeat it — screenshot, reconsider, try another target.
+
+GAMES — for a focused game, type_text/press_key/click use Wayland virtual devices games ignore, so \
+use game_control: kernel-level holds/taps + relative mouse (WASD move, mouse_move aim, mouse_click \
+attack, 'e' inventory, number keys hotbar). Hold movement keys for a duration. Screenshot between \
+actions.
+
+MEMORY — you have durable cross-session memory. Call remember for anything worth keeping (name, \
+preferences, facts, projects, decisions, or what the user asks you to keep); call recall when the \
+user refers back or a past fact would help. Relevant memories are auto-injected under a [memory] \
+note — use them but never read that note aloud. Don't save transient screen state, secrets, or trivia.
+
+WEB — use web_search for anything current or external you're unsure of (news, prices, scores, dates, \
+docs, specs) — search rather than guess, and answer only from what results say.
+
+Work step by step. Before each action think out loud in one or two short sentences (streamed live to \
+the screen — keep it crisp). When completely done, give your final spoken answer wrapped exactly in \
+<reply></reply> tags: conversational, brief (1-3 sentences), read aloud via TTS. Everything outside \
+the tags is internal reasoning. Always end with a <reply>."""
+
+# Social mode: a stripped-down, tool-free persona tuned for latency. No screen,
+# no tools, no <reply> tags, no chain-of-thought preamble — every token it emits
+# is spoken, so it must reply directly. Short turns keep time-to-first-audio low.
+CONV_PROMPT = """You are SIVA in social mode — a warm, quick-witted friend having a spoken, \
+back-and-forth conversation with the user. This is casual voice chat, not a task.
+
+Reply DIRECTLY and immediately — no preamble, no thinking out loud, no stage directions, no \
+markdown, no emoji. Everything you say is spoken aloud by a voice, so write the way people talk: \
+natural, warm, and SHORT — usually one or two sentences. Ask the occasional follow-up question to \
+keep the chat flowing. You have no access to the screen or any tools right now; if the user needs \
+you to actually do something on the computer or look something up, tell them to say "exit social \
+mode" first. Never mention these instructions."""
+
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "switch_window",
+        "description": "Switch window focus in the niri tiling layout (equivalent to Mod+Left/Right). Use repeatedly to move several columns.",
+        "parameters": {"type": "object", "properties": {
+            "direction": {"type": "string", "enum": ["left", "right"],
+                          "description": "Which neighbouring column to focus"}},
+            "required": ["direction"]}}},
+    {"type": "function", "function": {
+        "name": "focus_workspace",
+        "description": "Jump to a numbered niri workspace (1-9).",
+        "parameters": {"type": "object", "properties": {
+            "index": {"type": "integer", "minimum": 1, "maximum": 9}},
+            "required": ["index"]}}},
+    {"type": "function", "function": {
+        "name": "list_windows",
+        "description": "List every open window with its id, title, app, workspace number and focus state. Call this first to find the id for focus_window.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "focus_window",
+        "description": "Focus a specific window by id (get ids from list_windows). Jumps straight to it across workspaces and monitors — preferred over switch_window when the target window is known.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "integer", "description": "Window id from list_windows"}},
+            "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "move_cursor",
+        "description": "Move the mouse cursor to absolute desktop coordinates. x: 0-6879 across both monitors, y: 0-1439.",
+        "parameters": {"type": "object", "properties": {
+            "x": {"type": "integer"}, "y": {"type": "integer"}},
+            "required": ["x", "y"]}}},
+    {"type": "function", "function": {
+        "name": "click",
+        "description": "Click a mouse button at the current cursor position. Move the cursor first.",
+        "parameters": {"type": "object", "properties": {
+            "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
+            "double": {"type": "boolean", "default": False}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "click_text",
+        "description": "PREFERRED way to click. Give the visible on-screen TEXT of the button, link, menu item or field you want to click; SIVA runs OCR on the live screen, finds that text, and clicks its centre for you — no pixel guessing. Use move_cursor+click only for icons/targets with no readable text.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "Exact visible text to click, e.g. 'Sign in', 'File', 'Search'. Keep it short and distinctive."},
+            "monitor": {"type": "string", "enum": ["focused", "DP-1", "DP-2"], "default": "focused",
+                        "description": "Which monitor the text is on. DP-1 = left (Alienware), DP-2 = right (ASUS)."},
+            "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
+            "double": {"type": "boolean", "default": False}},
+            "required": ["text"]}}},
+    {"type": "function", "function": {
+        "name": "scroll",
+        "description": "Scroll the mouse wheel at the current cursor position. Positive = up, negative = down.",
+        "parameters": {"type": "object", "properties": {
+            "amount": {"type": "integer", "description": "Wheel clicks; e.g. -5 scrolls down five notches"}},
+            "required": ["amount"]}}},
+    {"type": "function", "function": {
+        "name": "type_text",
+        "description": "Type literal text into the currently focused window (chat boxes, search bars, documents, in-game chat). Works across normal apps AND games — it uses the Wayland virtual keyboard where possible and automatically falls back to kernel-level input so it lands even in apps that ignore virtual keyboards.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}},
+            "required": ["text"]}}},
+    {"type": "function", "function": {
+        "name": "press_key",
+        "description": "Press a single key or simple combo in the focused window. Examples: 'Return', 'Escape', 'Tab', 'ctrl+t', 'ctrl+shift+t', 'super+d'. For in-GAME key presses use game_control instead (this uses the Wayland virtual keyboard, which many games ignore).",
+        "parameters": {"type": "object", "properties": {
+            "key": {"type": "string"}},
+            "required": ["key"]}}},
+    {"type": "function", "function": {
+        "name": "game_control",
+        "description": "Low-level keyboard + mouse input for GAMES (Minecraft, shooters, etc.). Injected at the kernel/uinput level via ydotool so games actually receive it — unlike type_text/press_key/click, which use the Wayland virtual keyboard most games ignore. Runs an ordered `actions` list. Mouse moves are RELATIVE to the in-game camera (+dx looks right, +dy down). Examples: walk forward 2s = [{\"hold\":\"w\",\"ms\":2000}]; open inventory = [{\"tap\":\"e\"}]; look right = [{\"mouse_move\":[400,0]}]; aim+fire = [{\"mouse_down\":\"right\"},{\"mouse_click\":\"left\"},{\"mouse_up\":\"right\"}]; chat = [{\"tap\":\"t\"},{\"text\":\"gg\"},{\"tap\":\"enter\"}].",
+        "parameters": {"type": "object", "properties": {
+            "actions": {"type": "array", "description": "Ordered input steps, executed in sequence.",
+                "items": {"type": "object", "properties": {
+                    "hold": {"type": "string", "description": "Key to press and HOLD for `ms` then release, e.g. 'w','a','s','d','shift'. For movement."},
+                    "tap": {"type": "string", "description": "Key to quickly press+release, e.g. 'e','space','1'..'9','f','t'."},
+                    "key_down": {"type": "string", "description": "Press a key and leave it held (pair with a later key_up)."},
+                    "key_up": {"type": "string", "description": "Release a key held by key_down."},
+                    "mouse_move": {"type": "array", "items": {"type": "integer"}, "description": "Relative [dx,dy] pixels for camera/aim. +x right, +y down."},
+                    "mouse_click": {"type": "string", "enum": ["left", "right", "middle"], "description": "Full click — attack/shoot/use."},
+                    "mouse_down": {"type": "string", "enum": ["left", "right", "middle"], "description": "Press and hold a mouse button (e.g. right to aim); release with mouse_up."},
+                    "mouse_up": {"type": "string", "enum": ["left", "right", "middle"]},
+                    "text": {"type": "string", "description": "Type a literal string (e.g. in-game chat), injected at kernel level."},
+                    "ms": {"type": "integer", "description": "Duration for `hold`; or, on a step with no other field, a pause. Max 15000."}}}}},
+            "required": ["actions"]}}},
+    {"type": "function", "function": {
+        "name": "screenshot",
+        "description": "Capture one frame of the desktop and attach it so you can see the current screen state.",
+        "parameters": {"type": "object", "properties": {
+            "output": {"type": "string", "enum": ["focused", "DP-1", "DP-2", "all"],
+                       "default": "focused",
+                       "description": "'focused' = monitor with keyboard focus, 'all' = both monitors in one wide image"}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "vision_loop",
+        "description": "Rapidly capture several sequential frames (e.g. to watch an animation, page load, or verify a multi-step UI change). Frames are attached in order.",
+        "parameters": {"type": "object", "properties": {
+            "frames": {"type": "integer", "minimum": 2, "maximum": 4, "default": 3},
+            "interval_ms": {"type": "integer", "minimum": 100, "maximum": 2000, "default": 500},
+            "output": {"type": "string", "enum": ["focused", "DP-1", "DP-2", "all"], "default": "focused"}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "spawn_app",
+        "description": "Launch a desktop application by command name, e.g. 'ghostty', 'chromium', 'nautilus'.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string"}},
+            "required": ["command"]}}},
+    {"type": "function", "function": {
+        "name": "remember",
+        "description": "Save a fact to durable long-term memory (persists across sessions). Use when the user shares something worth keeping — their name, preferences, facts about their life/work, ongoing projects, decisions, or anything they ask you to remember. State it plainly and self-contained. Do NOT save transient screen state, secrets, or trivia.",
+        "parameters": {"type": "object", "properties": {
+            "content": {"type": "string", "description": "The fact to remember, stated plainly and self-contained, e.g. \"The user's name is Vincent and he prefers concise, direct answers.\""},
+            "topic": {"type": "string", "description": "Short one- or two-word category for filing, e.g. 'preferences', 'projects', 'people', 'general'. Default 'general'."}},
+            "required": ["content"]}}},
+    {"type": "function", "function": {
+        "name": "recall",
+        "description": "Search your durable long-term memory for things saved in earlier sessions. Call this when the user refers back to something, asks what you remember, or when a past fact (their name, a preference, a project) would help. Returns matching memories with similarity scores.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Keywords or a short question describing what to recall, e.g. \"user's name\" or \"what game were we playing\". Max 250 chars."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5,
+                      "description": "Maximum number of memories to return."}},
+            "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "web_search",
+        "description": "Search the live web via the user's private local SearXNG engine and read the top results. Use whenever answering needs current or external info you can't be sure of — news, prices, scores, release dates, docs, product specs, or facts that may have changed since training. Returns ranked title/url/snippet plus extracted page text from the top hits; answer only from what the results say.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "The search query in natural words, e.g. 'current bitcoin price in usd' or 'niri wayland scrollable tiling docs'."},
+            "num_results": {"type": "integer", "minimum": 1, "maximum": 6, "default": 4,
+                            "description": "How many ranked results to return. Default 4."}},
+            "required": ["query"]}}},
+]
+
+
+def log(*a):
+    with open(LOG, "a") as f:
+        f.write(f"[{time.strftime('%H:%M:%S')}] {' '.join(str(x) for x in a)}\n")
+
+
+def sh(cmd, timeout=15, env=None, binary=False):
+    """Run a command, return (rc, stdout)."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env)
+        out = p.stdout if binary else p.stdout.decode(errors="replace").strip()
+        if p.returncode != 0:
+            log("cmd failed", cmd, p.stderr.decode(errors="replace")[:300])
+        return p.returncode, out
+    except Exception as e:
+        log("cmd error", cmd, e)
+        return 1, b"" if binary else str(e)
+
+
+class Broadcaster:
+    """Fan-out of JSON lines to every connected UI client."""
+
+    def __init__(self):
+        self.clients = []
+        self.lock = threading.Lock()
+
+    def add(self, conn):
+        with self.lock:
+            self.clients.append(conn)
+
+    def send(self, obj):
+        data = (json.dumps(obj) + "\n").encode()
+        with self.lock:
+            dead = []
+            for c in self.clients:
+                try:
+                    c.sendall(data)
+                except OSError:
+                    dead.append(c)
+            for c in dead:
+                self.clients.remove(c)
+
+
+class MemPalace:
+    """Durable cross-session memory backed by a MemPalace `mempalace-mcp`
+    subprocess (MCP over stdio: newline-delimited JSON-RPC 2.0 — the same
+    framing SIVA speaks on its own UI socket).
+
+    One long-lived child process keeps the embedding model warm, so recall is
+    fast after the first (cold) call. A single background reader thread pumps
+    the child's stdout and dispatches each response to the request waiting on
+    its id; stderr is drained to the daemon log.
+
+    Fail-soft throughout: if `mempalace-mcp` is not on PATH, or the handshake
+    or any call fails, `available` flips False and every method returns a soft
+    {"ok": False, ...} — SIVA keeps working, just without memory."""
+
+    PROTOCOL_VERSION = "2025-06-18"
+
+    def __init__(self, palace_path=""):
+        self.palace_path = palace_path
+        self.proc = None
+        self.ready = False
+        self.available = shutil.which(MEMPALACE_BIN) is not None
+        self._io_lock = threading.Lock()      # serialize writes to the child's stdin
+        self._start_lock = threading.Lock()   # one starter at a time
+        self._id = 0
+        self._pending = {}                     # request id -> {"ev", "resp"}
+
+    # ── process lifecycle ─────────────────────────────────────────────
+    def _spawn(self):
+        cmd = [MEMPALACE_BIN]
+        if self.palace_path:
+            cmd += ["--palace", self.palace_path]
+        env = {**os.environ, "MEMPALACE_MCP_IDLE_HOURS": "0"}  # never idle-exit under us
+        # NixOS + nix-ld: mempalace's numpy/onnxruntime/chromadb are generic
+        # wheels whose C-extensions dlopen libstdc++ (etc.) via the standard
+        # LD_LIBRARY_PATH — nix-ld's own NIX_LD_LIBRARY_PATH only covers the main
+        # executable, not these later loads. Fold the nix-ld lib dir into
+        # LD_LIBRARY_PATH so they resolve. No-op on systems without nix-ld.
+        nix_ld = os.environ.get("NIX_LD_LIBRARY_PATH") or (
+            NIX_LD_LIB_FALLBACK if os.path.isdir(NIX_LD_LIB_FALLBACK) else "")
+        if nix_ld:
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(
+                p for p in (env.get("LD_LIBRARY_PATH", ""), nix_ld) if p)
+        # Run from HOME: MemPalace (pydantic-settings) probes for a .env in the
+        # cwd at startup, so an unreadable cwd (e.g. the daemon was launched from
+        # a locked-down dir) would crash it. HOME is always readable by us.
+        self.proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1, env=env, cwd=HOME)
+        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
+        threading.Thread(target=self._drain_stderr, args=(self.proc,), daemon=True).start()
+
+    def _reader(self, proc):
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            slot = self._pending.get(msg.get("id"))
+            if slot:
+                slot["resp"] = msg
+                slot["ev"].set()
+
+    def _drain_stderr(self, proc):
+        for raw in proc.stderr:
+            line = raw.rstrip()
+            if line:
+                log("mempalace:", line[:200])
+
+    def start(self):
+        """Idempotently bring the child up and complete the MCP handshake.
+        Returns True once ready. Safe to call from many threads / every turn."""
+        if not self.available:
+            return False
+        if self.ready and self.proc and self.proc.poll() is None:
+            return True
+        with self._start_lock:
+            if self.ready and self.proc and self.proc.poll() is None:
+                return True
+            self.ready = False
+            try:
+                self._spawn()
+                # cold start loads chromadb + the embedding model — be patient
+                resp = self._request("initialize", {
+                    "protocolVersion": self.PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "siva", "version": "1.0"},
+                }, timeout=90)
+                if not resp or "result" not in resp:
+                    raise RuntimeError(f"initialize failed: {resp}")
+                self._notify("notifications/initialized", {})
+                self.ready = True
+                log("mempalace ready:", resp["result"].get("serverInfo"))
+                return True
+            except Exception as e:
+                log("mempalace start failed:", repr(e))
+                self.available = False  # don't hammer a broken/missing backend
+                with contextlib.suppress(Exception):
+                    self.proc.kill()
+                return False
+
+    # ── JSON-RPC plumbing ─────────────────────────────────────────────
+    def _send(self, obj):
+        with self._io_lock:
+            if not self.proc or self.proc.poll() is not None:
+                raise RuntimeError("mempalace process not running")
+            self.proc.stdin.write(json.dumps(obj) + "\n")
+            self.proc.stdin.flush()
+
+    def _notify(self, method, params):
+        self._send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def _request(self, method, params, timeout=20):
+        self._id += 1
+        rid = self._id
+        ev = threading.Event()
+        self._pending[rid] = {"ev": ev, "resp": None}
+        try:
+            self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+            if not ev.wait(timeout):
+                log("mempalace timeout on", method)
+                return None
+            return self._pending[rid]["resp"]
+        finally:
+            self._pending.pop(rid, None)
+
+    def _call_tool(self, tool, arguments, timeout=20):
+        """Invoke an MCP tool; return the handler's parsed dict result, or a
+        soft error dict. MemPalace wraps handler dicts as JSON text in a
+        content block, so unwrap content[0].text back into a dict."""
+        if not self.start():
+            return {"ok": False, "error": "memory backend unavailable"}
+        try:
+            resp = self._request("tools/call",
+                                  {"name": tool, "arguments": arguments}, timeout)
+        except Exception as e:
+            return {"ok": False, "error": f"memory call failed: {e}"}
+        if not resp:
+            return {"ok": False, "error": "memory backend timed out"}
+        if "error" in resp:
+            return {"ok": False, "error": resp["error"].get("message", "mcp error")}
+        result = resp.get("result", {})
+        for block in result.get("content", []):
+            if block.get("type") == "text":
+                try:
+                    return json.loads(block["text"])
+                except (json.JSONDecodeError, TypeError):
+                    return {"ok": True, "text": block["text"]}
+        return result
+
+    # ── high-level ops used by SIVA ───────────────────────────────────
+    def add(self, wing, room, content):
+        r = self._call_tool("mempalace_add_drawer",
+                             {"wing": wing, "room": room,
+                              "content": content, "added_by": "siva"}, timeout=30)
+        if r.get("error"):
+            return {"ok": False, "error": r["error"]}
+        return {"ok": True, "saved": content[:80], "room": room}
+
+    def search(self, query, limit=5):
+        r = self._call_tool("mempalace_search",
+                            {"query": query[:250], "limit": max(1, min(int(limit), 20))})
+        if r.get("error"):
+            return {"ok": False, "error": r["error"]}
+        hits = []
+        for h in r.get("results", []):
+            hits.append({"memory": h.get("text") or h.get("content") or "",
+                         "topic": h.get("room", ""),
+                         "similarity": h.get("similarity")})
+        return {"ok": True, "count": len(hits), "memories": hits}
+
+    def recall_context(self, text, limit=3):
+        """Return a short [memory] preamble of memories relevant to `text`,
+        for silent injection into the turn — or '' if nothing relevant."""
+        r = self.search(text, limit)
+        mems = [m["memory"].strip() for m in r.get("memories", []) if m.get("memory", "").strip()]
+        if not mems:
+            return ""
+        bullets = "\n".join(f"- {m}" for m in mems[:limit])
+        return ("[memory] Things you remember about the user from earlier sessions "
+                "(use if relevant; do not read this note aloud):\n" + bullets)
+
+
+class Siva:
+    def __init__(self):
+        self.ui = Broadcaster()
+        self.memory = MemPalace(MEMPALACE_PALACE)
+        self.state = "idle"
+        self.rec_proc = None
+        self.rec_lock = threading.Lock()
+        self.mic_target = None
+        self.saved_sink_vol = None
+        self.cancel_flag = threading.Event()
+        self.turn_lock = threading.Lock()
+        # social (hands-free conversation) mode + streaming-TTS control
+        self.conv_active = threading.Event()   # social mode loop is running
+        self.conv_exit = threading.Event()     # request to leave social mode
+        self.tts_stop = threading.Event()      # interrupt current speech (barge-in/cancel)
+        self.tts_lock = threading.Lock()
+        self.play_proc = None                  # current pw-play process
+        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # agentic live-stream state (drives Stream.qml)
+        self.stream_on = False
+        self.stream_lock = threading.Lock()
+        self.stream_seq = 0
+        self.last_cursor = None      # [ax, ay] absolute desktop pixels
+        self.last_action = ""        # human-readable current action label
+
+    # ── state / UI helpers ────────────────────────────────────────────
+    def set_state(self, s):
+        self.state = s
+        self.ui.send({"type": "status", "value": s})
+        log("state ->", s)
+
+    def error(self, text):
+        log("ERROR:", text)
+        self.ui.send({"type": "error", "text": text})
+        self.set_state("idle")
+
+    # ── audio ─────────────────────────────────────────────────────────
+    def list_sources(self):
+        """All selectable audio inputs as [{id, name}]. Covers the top-level
+        hardware Sources *and* the filter-chain / loopback nodes exposed as
+        Audio/Source (e.g. an easyeffects 'deep_eboy_voice' chain, or a
+        Scarlett's per-channel Mic1/Mic2 splits) — those live under the
+        Filters section and the plain Sources scan misses them, which is how
+        a working mic can be invisible to the picker. A synthetic 'System
+        default' entry (id "") records from whatever PipeWire calls default.
+        Node ids are ephemeral, so callers match on the stable name and
+        resolve the id fresh each time."""
+        _, out = sh(["wpctl", "status"])
+        sources = [{"id": "", "name": "System default"}]
+        section = None
+        for line in out.splitlines():
+            if "Sources:" in line:
+                section = "sources"; continue
+            if "Filters:" in line:
+                section = "filters"; continue
+            if any(h in line for h in ("Sinks:", "Devices:", "Streams:")):
+                section = None; continue
+            if section == "sources":
+                # audio sources carry a "[vol: …]" badge; video ones don't
+                m = re.search(r"(\d+)\.\s+(.+?)\s*\[vol", line)
+                if m:
+                    sources.append({"id": m.group(1), "name": m.group(2).strip()})
+            elif section == "filters":
+                m = re.search(r"(\d+)\.\s+(\S.*?)\s+\[Audio/Source\]", line)
+                if m:
+                    sources.append({"id": m.group(1), "name": m.group(2).strip()})
+        return sources
+
+    def load_mic(self):
+        try:
+            with open(MIC_FILE) as f:
+                return json.load(f).get("name", "")
+        except Exception:
+            return ""
+
+    def save_mic(self, name):
+        os.makedirs(os.path.dirname(MIC_FILE), exist_ok=True)
+        with open(MIC_FILE, "w") as f:
+            json.dump({"name": name}, f)
+
+    def send_sources(self):
+        self.ui.send({"type": "sources",
+                      "items": self.list_sources(),
+                      "selected": self.load_mic()})
+
+    def find_mic(self):
+        """Resolve the input to record from, in priority order:
+        1. the user's persisted choice (matched by description name),
+        2. a Scarlett/Focusrite hardware source (auto-detect),
+        3. the PipeWire default — which can be a dead/virtual node, so it
+           is the last resort."""
+        sources = self.list_sources()
+        saved = self.load_mic()
+        if saved == "System default":
+            return None, "System default"
+        if saved:
+            for s in sources:
+                if s["name"] == saved:
+                    return s["id"], s["name"]
+        for s in sources:
+            if s["id"] and re.search(r"scarlett|focusrite", s["name"], re.I):
+                return s["id"], s["name"]
+        return None, "default source"
+
+    def wav_is_silent(self, wav):
+        """True if the capture never rises above the noise floor —
+        whisper hallucinates words like "you" on silent input."""
+        try:
+            with contextlib.closing(wave.open(wav, "rb")) as w:
+                frames = w.readframes(w.getnframes())
+            samples = array.array("h", frames[: len(frames) // 2 * 2])
+            return not samples or max(abs(s) for s in samples) < 300
+        except Exception:
+            return False
+
+    def _duck_audio(self):
+        """Halve desktop volume while listening so speaker output doesn't
+        bleed into the mic; restored to the exact prior level afterwards."""
+        rc, out = sh(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+        m = re.search(r"Volume:\s*([\d.]+)", out)
+        if rc == 0 and m and self.saved_sink_vol is None:
+            self.saved_sink_vol = m.group(1)
+            sh(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@",
+                f"{float(m.group(1)) * 0.5:.2f}"])
+
+    def _unduck_audio(self):
+        vol, self.saved_sink_vol = self.saved_sink_vol, None
+        if vol is not None:
+            sh(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", vol])
+
+    def _spawn_rec(self):
+        cmd = ["pw-record", "--format", "s16", "--rate", "16000", "--channels", "1", REC_WAV]
+        if self.mic_target:
+            cmd = ["pw-record", "--target", self.mic_target, "--format", "s16",
+                   "--rate", "16000", "--channels", "1", REC_WAV]
+        return subprocess.Popen(cmd)
+
+    def _watch_capture(self, proc):
+        """pw-record occasionally attaches to a capture stream that only
+        delivers zeros (seen when recording starts the instant a previous
+        stream tears down). Real input always has a noise floor, so if the
+        first second of the file is digital silence, bounce the recorder —
+        a fresh stream comes up live."""
+        for _ in range(2):
+            time.sleep(1.2)
+            with self.rec_lock:
+                if self.rec_proc is not proc or proc.poll() is not None:
+                    return
+            try:
+                with open(REC_WAV, "rb") as f:
+                    data = f.read(65536)[44:]  # skip WAV header
+            except OSError:
+                data = b""
+            samples = array.array("h", data[: len(data) // 2 * 2])
+            if samples and any(samples):
+                return
+            with self.rec_lock:
+                if self.rec_proc is not proc:
+                    return
+                log("capture stream dead (all zeros) — bouncing pw-record")
+                proc.send_signal(signal.SIGINT)
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                proc = self.rec_proc = self._spawn_rec()
+        # still dead after retries: the wav_is_silent guard reports it
+
+    def start_recording(self):
+        tid, name = self.find_mic()
+        self.mic_target = tid
+        self.ui.send({"type": "mic", "device": name})
+        try:
+            os.unlink(REC_WAV)
+        except FileNotFoundError:
+            pass
+        self._duck_audio()
+        with self.rec_lock:
+            self.rec_proc = self._spawn_rec()
+        threading.Thread(target=self._watch_capture, args=(self.rec_proc,),
+                         daemon=True).start()
+        self.set_state("listening")
+
+    def stop_recording(self):
+        self._unduck_audio()
+        with self.rec_lock:
+            p, self.rec_proc = self.rec_proc, None
+        if not p:
+            return None
+        p.send_signal(signal.SIGINT)
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            p.terminate()
+            p.wait(timeout=2)
+        if not (os.path.exists(REC_WAV) and os.path.getsize(REC_WAV) > 8000):
+            return None
+        return REC_WAV
+
+    def transcribe(self, wav):
+        model = WHISPER_MODEL if os.path.exists(WHISPER_MODEL) else WHISPER_FALLBACK
+        if not os.path.exists(model):
+            self.error("No whisper model found")
+            return None
+        rc, out = sh(["whisper-cli", "-m", model, "-f", wav, "-l", "en", "-np", "-nt"],
+                     timeout=60)
+        if rc != 0:
+            return None
+        text = " ".join(l.strip() for l in out.splitlines()
+                        if l.strip() and not l.startswith("["))
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or None
+
+    # ── streaming text-to-speech ──────────────────────────────────────
+    _BOUNDARY_RE = re.compile(r"[.!?…\n]+")
+
+    @staticmethod
+    def _find_piper():
+        for cand in ("piper", "piper-tts"):
+            rc, _ = sh(["which", cand], timeout=5)
+            if rc == 0:
+                return cand
+        return None
+
+    def _tts_interrupted(self):
+        return (self.tts_stop.is_set() or self.cancel_flag.is_set()
+                or self.conv_exit.is_set())
+
+    def _pop_sentences(self, buf):
+        """Split off complete sentences from a running buffer.
+        Returns (list_of_sentences, remainder)."""
+        sents = []
+        while True:
+            m = self._BOUNDARY_RE.search(buf)
+            if not m:
+                break
+            s = buf[:m.end()].strip()
+            buf = buf[m.end():]
+            if s:
+                sents.append(s)
+        return sents, buf
+
+    def _synth_sentence(self, piper, text, idx):
+        """Render one sentence to a wav via piper, then the selected RVC voice
+        (if any). Returns a playable wav path or None."""
+        wav = f"/tmp/siva-tts-{idx}.wav"
+        try:
+            p = subprocess.run([piper, "-m", PIPER_VOICE, "-f", wav],
+                               input=text.encode(), capture_output=True, timeout=30)
+        except Exception as e:
+            log("piper error", e)
+            return None
+        if p.returncode != 0:
+            return None
+        # keep the user's RVC voice even in the streaming path: convert this
+        # one sentence, falling back to plain piper on any error/timeout
+        if os.path.exists(os.path.join(HOME, ".local/share/siva/voice.json")):
+            rvc_wav = f"/tmp/siva-tts-{idx}r.wav"
+            siva_rvc = os.path.join(HOME, ".local/bin/siva-rvc")
+            try:
+                r = subprocess.run([siva_rvc, wav, rvc_wav],
+                                   capture_output=True, timeout=120)
+                if r.returncode == 0 and os.path.exists(rvc_wav):
+                    return rvc_wav
+            except Exception as e:
+                log("rvc convert error", e)
+        return wav
+
+    def speak_stream(self, source):
+        """Speak text as it becomes available. `source` is an iterable of text
+        chunks (a single full string, or streaming deltas from the LLM). We
+        synthesize and play sentence-by-sentence in a two-stage pipeline — the
+        next sentence is rendered while the current one plays — so the first
+        words are heard almost immediately instead of after the whole reply.
+        Blocks until playback finishes or speech is interrupted."""
+        piper = self._find_piper()
+        if not piper or not os.path.exists(PIPER_VOICE):
+            for _ in source:      # still drain the generator (drives UI/history)
+                pass
+            return
+        self.tts_stop.clear()
+        self.set_state("speaking")
+        play_q = queue.Queue()
+        n = [0]
+
+        def synth_worker():
+            buf = ""
+            try:
+                for chunk in source:
+                    if self._tts_interrupted():
+                        break
+                    buf += chunk
+                    sents, buf = self._pop_sentences(buf)
+                    for s in sents:
+                        if self._tts_interrupted():
+                            buf = ""
+                            break
+                        n[0] += 1
+                        w = self._synth_sentence(piper, s, n[0])
+                        if w:
+                            play_q.put(w)
+                if buf.strip() and not self._tts_interrupted():
+                    n[0] += 1
+                    w = self._synth_sentence(piper, buf.strip(), n[0])
+                    if w:
+                        play_q.put(w)
+            finally:
+                play_q.put(None)   # sentinel: no more audio
+
+        t = threading.Thread(target=synth_worker, daemon=True)
+        t.start()
+        try:
+            while True:
+                w = play_q.get()
+                if w is None:
+                    break
+                if self._tts_interrupted():
+                    continue       # drain remaining wavs without playing
+                try:
+                    with self.tts_lock:
+                        self.play_proc = subprocess.Popen(["pw-play", w])
+                    while True:
+                        try:
+                            self.play_proc.wait(timeout=0.1)
+                            break
+                        except subprocess.TimeoutExpired:
+                            if self._tts_interrupted():
+                                self.play_proc.terminate()
+                                break
+                except Exception as e:
+                    log("play error", e)
+                finally:
+                    with self.tts_lock:
+                        self.play_proc = None
+                    try:
+                        os.unlink(w)
+                    except OSError:
+                        pass
+        finally:
+            t.join(timeout=2)
+
+    def speak(self, text):
+        """Speak a complete string (still pipelined sentence-by-sentence)."""
+        if text and text.strip():
+            self.speak_stream(iter([text]))
+
+    # ── social mode (hands-free conversation) ─────────────────────────
+    _ENTER_RE = re.compile(
+        r"\b(activate|enter|start|begin|enable|turn on|go(?:ing)? into|"
+        r"switch to|let'?s do)\b[^.?!]*\bsocial mode\b", re.I)
+    _EXIT_RE = re.compile(
+        r"\b(exit|leave|end|stop|deactivate|disable|quit|close|turn off)\b"
+        r"[^.?!]*\bsocial mode\b|\b(good ?bye|that'?s all|that is all|"
+        r"we'?re done|i'?m done)\b", re.I)
+
+    def is_enter_conversation(self, text):
+        return bool(self._ENTER_RE.search(text or ""))
+
+    def _is_exit_conversation(self, text):
+        return bool(self._EXIT_RE.search(text or ""))
+
+    def _vad_record(self):
+        """Capture one utterance hands-free: wait for speech to start, then
+        record until a stretch of trailing silence ends it. Returns a 16 kHz
+        mono wav path, or None if nobody spoke / social mode is exiting."""
+        tid, _ = self.find_mic()
+        self.mic_target = tid
+        self.set_state("listening")
+        cmd = ["pw-record", "--format", "s16", "--rate", "16000",
+               "--channels", "1", "-"]
+        if tid:
+            cmd[1:1] = ["--target", tid]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        step = 1280 * 2                     # 80 ms frames
+        frames, started, silent, t0 = [], False, 0.0, time.time()
+        try:
+            while True:
+                if self.conv_exit.is_set():
+                    return None
+                data = proc.stdout.read(step)
+                if not data or len(data) < step:
+                    break
+                peak = max((abs(s) for s in array.array("h", data)), default=0)
+                frames.append(data)
+                if not started:
+                    if peak >= CONV_ONSET:
+                        started = True
+                        frames = frames[-4:]        # keep a little pre-roll
+                    elif time.time() - t0 > CONV_WAIT:
+                        return None                 # nobody spoke
+                    elif len(frames) > 40:
+                        frames = frames[-8:]        # bound idle buffer
+                else:
+                    if peak >= CONV_SILENCE:
+                        silent = 0.0
+                    else:
+                        silent += 0.08
+                        if silent >= CONV_END_SIL:
+                            break
+                    if time.time() - t0 > CONV_MAX_UTT + CONV_WAIT:
+                        break
+        finally:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if not started:
+            return None
+        wav = "/tmp/siva-conv.wav"
+        with contextlib.closing(wave.open(wav, "wb")) as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"".join(frames))
+        return wav
+
+    def chat_stream(self, messages):
+        """Fast, tool-free streaming completion for social mode. Yields plain
+        content deltas as they arrive (no <reply> protocol, no tools) so we can
+        start speaking the moment the first sentence lands.
+
+        Crucially it disables gemma's chain-of-thought (enable_thinking=false):
+        this model is a reasoning model that otherwise streams its thinking into
+        a separate `reasoning_content` channel and only commits the answer to
+        `content` after it finishes — which both delays and can eat the whole
+        token budget. Turning thinking off drops a short reply from ~2-3 s of
+        thinking to ~0.4 s of direct answer."""
+        body = json.dumps({"model": "siva", "stream": True, "messages": messages,
+                           "temperature": 0.7, "max_tokens": 300,
+                           "chat_template_kwargs": {"enable_thinking": False}})
+        conn = http.client.HTTPConnection(LLAMA_HOST, LLAMA_PORT, timeout=120)
+        try:
+            conn.request("POST", "/v1/chat/completions", body,
+                         {"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            if resp.status != 200:
+                log("chat_stream HTTP", resp.status)
+                return
+            buf = b""
+            while True:
+                if self.conv_exit.is_set() or self.tts_stop.is_set():
+                    break
+                chunk = resp.read1(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.strip()
+                    if not line.startswith(b"data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == b"[DONE]":
+                        return
+                    try:
+                        delta = json.loads(payload)["choices"][0]["delta"]
+                    except (KeyError, IndexError, json.JSONDecodeError):
+                        continue
+                    if delta.get("content"):
+                        yield delta["content"]
+        finally:
+            conn.close()
+
+    def conversation_loop(self):
+        """Hands-free social mode: listen (VAD) → fast chat → streamed TTS,
+        looping until the user says an exit phrase or presses F8. Holds the
+        turn lock for the whole session so normal turns can't interleave."""
+        if not self.turn_lock.acquire(blocking=False):
+            return
+        self.conv_active.set()
+        self.conv_exit.clear()
+        self.cancel_flag.clear()
+        try:
+            conv = [{"role": "system", "content": CONV_PROMPT}]
+            self.ui.send({"type": "show"})
+            self.ui.send({"type": "cot_clear"})
+            self.ui.send({"type": "reply_clear"})
+            self.ui.send({"type": "transcript", "text": "[social mode]"})
+            self.speak_stream(iter(["Social mode on. What's up?"]))
+            empties = 0
+            while not self.conv_exit.is_set():
+                wav = self._vad_record()
+                if self.conv_exit.is_set():
+                    break
+                if not wav:
+                    empties += 1
+                    if empties >= 2:          # two quiet waits → bow out
+                        break
+                    continue
+                empties = 0
+                if self.wav_is_silent(wav):
+                    continue
+                text = self.transcribe(wav)
+                if not text:
+                    continue
+                self.ui.send({"type": "transcript", "text": text})
+                if self._is_exit_conversation(text):
+                    break
+                conv.append({"role": "user", "content": text})
+                if len(conv) > 21:            # keep history bounded
+                    conv = [conv[0]] + conv[-18:]
+                self.set_state("thinking")
+                self.ui.send({"type": "reply_clear"})
+                parts = []
+
+                def gen():
+                    for d in self.chat_stream(conv):
+                        parts.append(d)
+                        self.ui.send({"type": "reply", "text": d})
+                        yield d
+
+                self.speak_stream(gen())
+                conv.append({"role": "assistant",
+                             "content": "".join(parts).strip() or "..."})
+            self.speak_stream(iter(["Leaving social mode. Talk soon!"]))
+        except Exception as e:
+            self.error(f"conversation: {type(e).__name__}: {e}")
+        finally:
+            self.conv_active.clear()
+            self.conv_exit.clear()
+            self.tts_stop.clear()
+            self.set_state("idle")
+            self.turn_lock.release()
+
+    # ── screen capture ────────────────────────────────────────────────
+    def grab_frame(self, output="focused"):
+        """Return a base64 data-URI of one screen frame, downscaled 50%."""
+        args = ["grim", "-s", "0.5", "-t", "png"]
+        if output == "focused":
+            rc, out = sh(["niri", "msg", "-j", "focused-output"])
+            try:
+                name = json.loads(out)["name"]
+                args += ["-o", name]
+            except Exception:
+                pass
+        elif output in ("DP-1", "DP-2"):
+            args += ["-o", output]
+        args += ["-"]
+        rc, png = sh(args, timeout=10, binary=True)
+        if rc != 0 or not png:
+            return None
+        return "data:image/png;base64," + base64.b64encode(png).decode()
+
+    # ── OCR click-by-text ─────────────────────────────────────────────
+    def ocr_find(self, png_path, target):
+        """Locate `target` text on a captured monitor image and return the
+        pixel centre (x, y) of the best match, or None. Uses tesseract TSV
+        (word boxes + confidence). Matches, in order of preference: an exact
+        word, a consecutive multi-word run on one line whose text contains
+        the target, then a loose single-word substring."""
+        rc, out = sh(["tesseract", png_path, "stdout", "--psm", "11", "-l", "eng", "tsv"],
+                     timeout=30)
+        if rc != 0 or not out:
+            return None
+        words = []
+        for row in out.splitlines()[1:]:
+            f = row.split("\t")
+            if len(f) < 12:
+                continue
+            try:
+                conf = float(f[10])
+            except ValueError:
+                continue
+            txt = f[11].strip()
+            if not txt or conf < OCR_MIN_CONF:
+                continue
+            words.append({"t": txt, "l": int(f[6]), "y": int(f[7]),
+                          "w": int(f[8]), "h": int(f[9]),
+                          "line": (f[1], f[2], f[3], f[4])})
+        if not words:
+            return None
+        tl = target.lower().strip()
+
+        def centre(ws):
+            l = min(w["l"] for w in ws); t = min(w["y"] for w in ws)
+            r = max(w["l"] + w["w"] for w in ws); b = max(w["y"] + w["h"] for w in ws)
+            return ((l + r) // 2, (t + b) // 2)
+
+        # 1. exact single-word hit
+        for w in words:
+            if w["t"].lower() == tl:
+                return centre([w])
+        # 2. consecutive words on the same line that contain the phrase
+        lines = {}
+        for w in words:
+            lines.setdefault(w["line"], []).append(w)
+        toks = tl.split()
+        for ws in lines.values():
+            ws.sort(key=lambda w: w["l"])
+            joined = " ".join(w["t"].lower() for w in ws)
+            if tl in joined:
+                start = next((i for i, w in enumerate(ws)
+                              if toks[0] in w["t"].lower()), 0)
+                span = ws[start:start + len(toks)] or ws
+                return centre(span)
+        # 3. loose single-word substring
+        for w in words:
+            if tl in w["t"].lower():
+                return centre([w])
+        return None
+
+    # ── live agentic stream (dual-monitor feed for Stream.qml) ─────────
+    def start_stream(self):
+        with self.stream_lock:
+            if self.stream_on:
+                return
+            self.stream_on = True
+            self.stream_seq = 0
+        os.makedirs(STREAM_DIR, exist_ok=True)
+        self.ui.send({"type": "agent_start", "monitors": [
+            {"id": mid, "label": g["label"], "w": g["w"], "h": g["h"],
+             "x": g["x"]} for mid, g in MONITORS.items()]})
+        threading.Thread(target=self._stream_loop, daemon=True).start()
+
+    def _stream_loop(self):
+        while self.stream_on:
+            for mid in MONITORS:
+                sh(["grim", "-o", mid, "-s", "0.25", os.path.join(STREAM_DIR, f"{mid}.png")],
+                   timeout=6)
+            self.stream_seq += 1
+            self.ui.send({"type": "frame", "seq": self.stream_seq,
+                          "cursor": list(self.last_cursor) if self.last_cursor else None,
+                          "action": self.last_action})
+            time.sleep(0.6)
+
+    def stop_stream(self):
+        with self.stream_lock:
+            if not self.stream_on:
+                return
+            self.stream_on = False
+        self.ui.send({"type": "agent_stop"})
+
+    # ── tool execution ────────────────────────────────────────────────
+    def run_tool(self, name, args):
+        log("tool", name, args)
+        if name == "switch_window":
+            d = args.get("direction", "right")
+            sh(["niri", "msg", "action",
+                "focus-column-left" if d == "left" else "focus-column-right"])
+            return {"ok": True, "action": f"focused column to the {d}"}
+
+        if name == "focus_workspace":
+            sh(["niri", "msg", "action", "focus-workspace", str(args.get("index", 1))])
+            return {"ok": True}
+
+        if name == "list_windows":
+            rc, out = sh(["niri", "msg", "-j", "windows"])
+            if rc != 0:
+                return {"ok": False, "error": out[:200]}
+            # niri reports an internal workspace_id; map it to the 1-9 index
+            ws_idx = {}
+            rc2, wout = sh(["niri", "msg", "-j", "workspaces"])
+            if rc2 == 0:
+                try:
+                    ws_idx = {w["id"]: w["idx"] for w in json.loads(wout)}
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            try:
+                wins = json.loads(out)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": "unparseable niri msg output"}
+            return {"ok": True, "windows": [
+                {"id": w["id"],
+                 "title": (w.get("title") or "")[:120],
+                 "app": w.get("app_id") or "",
+                 "workspace": ws_idx.get(w.get("workspace_id")),
+                 "focused": w.get("is_focused", False)}
+                for w in wins]}
+
+        if name == "focus_window":
+            rc, out = sh(["niri", "msg", "action", "focus-window",
+                          "--id", str(int(args["id"]))])
+            return {"ok": rc == 0} if rc == 0 else {"ok": False, "error": out[:200]}
+
+        if name == "move_cursor":
+            x, y = int(args["x"]), int(args["y"])
+            rc, _ = sh(["ydotool", "mousemove", "--absolute", "-x", str(x), "-y", str(y)],
+                       env=YDOTOOL_ENV)
+            self.last_cursor = [x, y]
+            return {"ok": rc == 0, "cursor": [x, y]}
+
+        if name == "click_text":
+            target = (args.get("text") or "").strip()
+            if not target:
+                return {"ok": False, "error": "no text given"}
+            mon = args.get("monitor", "focused")
+            if mon == "focused":
+                rc, out = sh(["niri", "msg", "-j", "focused-output"])
+                try:
+                    mon = json.loads(out)["name"]
+                except Exception:
+                    mon = "DP-1"
+            if mon not in MONITORS:
+                mon = "DP-1"
+            png = "/tmp/siva-ocr.png"
+            rc, _ = sh(["grim", "-o", mon, png], timeout=8)
+            if rc != 0:
+                return {"ok": False, "error": f"could not capture {mon}"}
+            hit = self.ocr_find(png, target)
+            if not hit:
+                return {"ok": False, "error": f"text '{target}' not found on {mon}; "
+                        "screenshot and try different/visible text or move_cursor"}
+            ax = MONITORS[mon]["x"] + int(hit[0])
+            ay = MONITORS[mon]["y"] + int(hit[1])
+            sh(["ydotool", "mousemove", "--absolute", "-x", str(ax), "-y", str(ay)],
+               env=YDOTOOL_ENV)
+            self.last_cursor = [ax, ay]
+            time.sleep(0.15)
+            code = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}[args.get("button", "left")]
+            n = 2 if args.get("double") else 1
+            for _ in range(n):
+                rc, _ = sh(["ydotool", "click", code], env=YDOTOOL_ENV)
+                time.sleep(0.08)
+            return {"ok": rc == 0, "clicked": target, "monitor": mon, "cursor": [ax, ay]}
+
+        if name == "click":
+            code = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}[args.get("button", "left")]
+            n = 2 if args.get("double") else 1
+            for _ in range(n):
+                rc, _ = sh(["ydotool", "click", code], env=YDOTOOL_ENV)
+                time.sleep(0.08)
+            return {"ok": rc == 0}
+
+        if name == "scroll":
+            amt = int(args.get("amount", -3))
+            rc, _ = sh(["ydotool", "mousemove", "--wheel", "-x", "0", "-y", str(amt)],
+                       env=YDOTOOL_ENV)
+            return {"ok": rc == 0}
+
+        if name == "type_text":
+            text = args.get("text", "")
+            p = subprocess.run(["wtype", "-"], input=text.encode(),
+                               capture_output=True, timeout=30)
+            if p.returncode == 0:
+                return {"ok": True, "via": "wtype"}
+            # wtype failed (e.g. a game / XWayland app ignoring the virtual
+            # keyboard) — fall back to kernel-level typing, which they see
+            rc, _ = sh(["ydotool", "type", "--", text], env=YDOTOOL_ENV, timeout=30)
+            return {"ok": rc == 0, "via": "ydotool"}
+
+        if name == "game_control":
+            acts = args.get("actions") or []
+            steps = 0
+            for a in acts[:64]:                     # cap sequence length
+                if not isinstance(a, dict):
+                    continue
+                if "hold" in a:
+                    code = KEYCODES.get(str(a["hold"]).lower())
+                    if code is None:
+                        continue
+                    ms = max(0, min(int(a.get("ms", 300)), 15000))
+                    sh(["ydotool", "key", f"{code}:1"], env=YDOTOOL_ENV)
+                    time.sleep(ms / 1000)
+                    sh(["ydotool", "key", f"{code}:0"], env=YDOTOOL_ENV)
+                elif "tap" in a:
+                    code = KEYCODES.get(str(a["tap"]).lower())
+                    if code is not None:
+                        sh(["ydotool", "key", f"{code}:1", f"{code}:0"], env=YDOTOOL_ENV)
+                elif "key_down" in a:
+                    code = KEYCODES.get(str(a["key_down"]).lower())
+                    if code is not None:
+                        sh(["ydotool", "key", f"{code}:1"], env=YDOTOOL_ENV)
+                elif "key_up" in a:
+                    code = KEYCODES.get(str(a["key_up"]).lower())
+                    if code is not None:
+                        sh(["ydotool", "key", f"{code}:0"], env=YDOTOOL_ENV)
+                elif "mouse_move" in a and isinstance(a["mouse_move"], list) \
+                        and len(a["mouse_move"]) == 2:
+                    dx, dy = int(a["mouse_move"][0]), int(a["mouse_move"][1])
+                    sh(["ydotool", "mousemove", "-x", str(dx), "-y", str(dy)],
+                       env=YDOTOOL_ENV)          # relative (no --absolute) = camera/aim
+                elif "mouse_click" in a and a["mouse_click"] in MOUSE_CLICK:
+                    sh(["ydotool", "click", MOUSE_CLICK[a["mouse_click"]]], env=YDOTOOL_ENV)
+                elif "mouse_down" in a and a["mouse_down"] in MOUSE_DN:
+                    sh(["ydotool", "click", MOUSE_DN[a["mouse_down"]]], env=YDOTOOL_ENV)
+                elif "mouse_up" in a and a["mouse_up"] in MOUSE_UP:
+                    sh(["ydotool", "click", MOUSE_UP[a["mouse_up"]]], env=YDOTOOL_ENV)
+                elif "text" in a:
+                    sh(["ydotool", "type", "--", str(a["text"])], env=YDOTOOL_ENV, timeout=30)
+                elif "ms" in a:
+                    time.sleep(max(0, min(int(a["ms"]), 15000)) / 1000)
+                else:
+                    continue
+                steps += 1
+            return {"ok": True, "steps": steps}
+
+        if name == "press_key":
+            combo = args["key"].strip()
+            parts = [p.strip() for p in combo.split("+")]
+            mods, key = parts[:-1], parts[-1]
+            modmap = {"ctrl": "ctrl", "control": "ctrl", "shift": "shift",
+                      "alt": "alt", "super": "logo", "mod": "logo", "logo": "logo"}
+            cmd = ["wtype"]
+            for m in mods:
+                cmd += ["-M", modmap.get(m.lower(), m.lower())]
+            cmd += ["-k", key]
+            for m in reversed(mods):
+                cmd += ["-m", modmap.get(m.lower(), m.lower())]
+            rc, _ = sh(cmd)
+            return {"ok": rc == 0}
+
+        if name == "screenshot":
+            uri = self.grab_frame(args.get("output", "focused"))
+            if not uri:
+                return {"ok": False, "error": "capture failed"}
+            return {"ok": True, "_frames": [uri]}
+
+        if name == "vision_loop":
+            n = min(int(args.get("frames", 3)), 4)
+            iv = int(args.get("interval_ms", 500)) / 1000
+            frames = []
+            for i in range(n):
+                uri = self.grab_frame(args.get("output", "focused"))
+                if uri:
+                    frames.append(uri)
+                if i < n - 1:
+                    time.sleep(iv)
+            return {"ok": bool(frames), "captured": len(frames), "_frames": frames}
+
+        if name == "spawn_app":
+            cmd = args.get("command", "")
+            if not re.fullmatch(r"[\w./-]+", cmd):
+                return {"ok": False, "error": "plain command names only"}
+            sh(["niri", "msg", "action", "spawn", "--", cmd])
+            return {"ok": True, "spawned": cmd}
+
+        if name == "remember":
+            content = (args.get("content") or "").strip()
+            if not content:
+                return {"ok": False, "error": "nothing to remember"}
+            # room = a filesystem-safe topic slug; wing groups all of SIVA's own memories
+            topic = re.sub(r"[^\w-]+", "-", (args.get("topic") or "general").strip().lower())
+            topic = topic.strip("-") or "general"
+            return self.memory.add(MEMORY_WING, topic, content)
+
+        if name == "recall":
+            query = (args.get("query") or "").strip()
+            if not query:
+                return {"ok": False, "error": "empty query"}
+            return self.memory.search(query, args.get("limit", 5))
+
+        if name == "web_search":
+            query = (args.get("query") or "").strip()
+            if not query:
+                return {"ok": False, "error": "empty query"}
+            return self.web_search(query, int(args.get("num_results", 4)))
+
+        return {"ok": False, "error": f"unknown tool {name}"}
+
+    # ── web search (local SearXNG RAG) ────────────────────────────────
+    @staticmethod
+    def _http_get(url, timeout, max_bytes):
+        req = urllib.request.Request(url, headers={
+            "User-Agent": WEB_UA, "Accept": "*/*"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ctype = r.headers.get("Content-Type", "")
+            return r.read(max_bytes), ctype
+
+    @staticmethod
+    def _html_to_text(raw):
+        """Very small HTML→text: drop script/style, strip tags, unescape
+        entities, collapse whitespace. Good enough to feed a page's gist to
+        the model without pulling in a parser dependency."""
+        try:
+            s = raw.decode("utf-8", "replace")
+        except Exception:
+            return ""
+        s = re.sub(r"(?is)<(script|style|noscript|svg|head)[^>]*>.*?</\1>", " ", s)
+        s = re.sub(r"(?s)<[^>]+>", " ", s)
+        s = htmllib.unescape(s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    def _fetch_page_text(self, url):
+        try:
+            raw, ctype = self._http_get(url, timeout=6, max_bytes=600_000)
+        except Exception:
+            return ""
+        if "html" not in ctype and "text" not in ctype and ctype:
+            return ""
+        return self._html_to_text(raw)[:WEB_FETCH_CHARS]
+
+    def web_search(self, query, num_results=4):
+        num_results = max(1, min(num_results, 6))
+        url = SEARXNG_URL + "/search?" + urllib.parse.urlencode({
+            "q": query, "format": "json", "safesearch": "0"})
+        try:
+            raw, _ = self._http_get(url, timeout=12, max_bytes=1_500_000)
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            hint = " — enable the json format in SearXNG (search.formats)" if e.code == 403 else ""
+            return {"ok": False, "error": f"SearXNG HTTP {e.code}{hint}"}
+        except Exception as e:
+            return {"ok": False, "error": f"SearXNG unreachable at {SEARXNG_URL}: {e}"}
+
+        hits = data.get("results") or []
+        results = []
+        for r in hits[:num_results]:
+            results.append({
+                "title": (r.get("title") or "").strip()[:120],
+                "url": r.get("url") or "",
+                "snippet": re.sub(r"\s+", " ", (r.get("content") or "")).strip()[:WEB_SNIPPET_CHARS],
+            })
+        if not results:
+            ans = data.get("answers") or []
+            if ans:
+                return {"ok": True, "query": query, "answer": " ".join(ans)[:800],
+                        "results": []}
+            return {"ok": False, "error": f"no results for {query!r}"}
+
+        # RAG step: pull readable text from the leading pages so the model
+        # reasons over real content, not just snippets. Fail-soft per page.
+        for r in results[:WEB_FETCH_PAGES]:
+            if r["url"]:
+                text = self._fetch_page_text(r["url"])
+                if text:
+                    r["content"] = text
+        out = {"ok": True, "query": query, "results": results}
+        if data.get("answers"):
+            out["answer"] = " ".join(data["answers"])[:800]
+        return out
+
+    # ── llama.cpp streaming ───────────────────────────────────────────
+    def llm_stream(self, messages):
+        """One streaming chat completion. Yields ('cot'|'reply', delta) text
+        events, routing on <reply> tags; returns (full_content, tool_calls)."""
+        body = json.dumps({
+            "model": "siva", "stream": True, "messages": messages,
+            "tools": TOOLS, "temperature": 0.6, "max_tokens": 2048,
+        })
+        conn = http.client.HTTPConnection(LLAMA_HOST, LLAMA_PORT, timeout=300)
+        conn.request("POST", "/v1/chat/completions", body,
+                     {"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise RuntimeError(f"llama-server HTTP {resp.status}: {resp.read()[:200]}")
+
+        content = ""
+        tool_calls = {}
+        pending = ""      # holdback buffer for tag detection
+        in_reply = False
+
+        def route(txt):
+            nonlocal pending, in_reply
+            pending += txt
+            while True:
+                if in_reply:
+                    idx = pending.find("</reply>")
+                    if idx >= 0:
+                        if idx:
+                            self.ui.send({"type": "reply", "text": pending[:idx]})
+                        pending = pending[idx + len("</reply>"):]
+                        in_reply = False
+                        continue
+                    # emit all but a potential partial closing tag
+                    keep = 0
+                    for k in range(min(len("</reply>") - 1, len(pending)), 0, -1):
+                        if "</reply>".startswith(pending[-k:]):
+                            keep = k
+                            break
+                    emit = pending[:len(pending) - keep]
+                    if emit:
+                        self.ui.send({"type": "reply", "text": emit})
+                    pending = pending[len(pending) - keep:]
+                    return
+                idx = pending.find("<reply>")
+                if idx >= 0:
+                    if pending[:idx].strip():
+                        self.ui.send({"type": "cot", "text": pending[:idx]})
+                    pending = pending[idx + len("<reply>"):]
+                    in_reply = True
+                    continue
+                keep = 0
+                for k in range(min(len("<reply>") - 1, len(pending)), 0, -1):
+                    if "<reply>".startswith(pending[-k:]):
+                        keep = k
+                        break
+                emit = pending[:len(pending) - keep]
+                if emit:
+                    self.ui.send({"type": "cot", "text": emit})
+                pending = pending[len(pending) - keep:]
+                return
+
+        buf = b""
+        while True:
+            if self.cancel_flag.is_set():
+                conn.close()
+                raise InterruptedError
+            chunk = resp.read1(65536)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line.startswith(b"data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == b"[DONE]":
+                    buf = b""
+                    break
+                try:
+                    delta = json.loads(payload)["choices"][0]["delta"]
+                except (KeyError, IndexError, json.JSONDecodeError):
+                    continue
+                # some servers stream reasoning separately; send straight to CoT
+                if delta.get("reasoning_content"):
+                    self.ui.send({"type": "cot", "text": delta["reasoning_content"]})
+                if delta.get("content"):
+                    content += delta["content"]
+                    route(delta["content"])
+                for tc in delta.get("tool_calls") or []:
+                    i = tc.get("index", 0)
+                    slot = tool_calls.setdefault(
+                        i, {"id": tc.get("id", f"call_{i}"),
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""}})
+                    fn = tc.get("function", {})
+                    if fn.get("name"):
+                        slot["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+        if pending.strip():
+            self.ui.send({"type": "reply" if in_reply else "cot", "text": pending})
+        conn.close()
+        return content, [tool_calls[i] for i in sorted(tool_calls)]
+
+    # ── agent turn ────────────────────────────────────────────────────
+    # ── context-window management ─────────────────────────────────────
+    def _est_tokens(self, messages):
+        """Conservative estimate of the prompt tokens for `messages` plus the
+        always-present tool schemas. ~4 chars/token slightly over-counts, which
+        is what we want — it biases us toward trimming a touch early rather than
+        overflowing the model's hard context limit."""
+        if not hasattr(self, "_tools_chars"):
+            self._tools_chars = len(json.dumps(TOOLS))
+        chars = self._tools_chars
+        for m in messages:
+            c = m.get("content")
+            if isinstance(c, list):
+                for p in c:
+                    chars += len(p.get("text", "")) if p.get("type") == "text" else 5000
+            elif c:
+                chars += len(c)
+            for tc in m.get("tool_calls") or []:
+                chars += len(json.dumps(tc))
+            chars += 24                       # per-message role/framing overhead
+        return int(chars / 4.2)               # ~4.2 chars/token for this mixed content
+
+    def _fit_context(self, reserve=CTX_REPLY_RESERVE):
+        """Drop the OLDEST conversation turns (never the system prompt) until the
+        prompt fits, keeping history starting on a user turn so tool_call/tool
+        pairs stay intact. Called with only prior history present (before the
+        current turn is appended), so it can't clip the in-progress turn."""
+        limit = LLAMA_CTX - reserve
+        while len(self.messages) > 1 and self._est_tokens(self.messages) > limit:
+            del self.messages[1]
+            while len(self.messages) > 1 and self.messages[1].get("role") != "user":
+                del self.messages[1]
+
+    def _emergency_trim(self):
+        """Last-resort trim used only if a request still overflows: keep the
+        system prompt + the current turn (from its last user message on).
+        Returns True if it actually dropped anything."""
+        for i in range(len(self.messages) - 1, 0, -1):
+            if self.messages[i].get("role") == "user" and i > 1:
+                self.messages = [self.messages[0]] + self.messages[i:]
+                return True
+        return False
+
+    def _stream_fitting(self, messages):
+        """llm_stream with a safety net: if the server rejects the request for
+        exceeding its context, hard-trim and retry once instead of crashing."""
+        try:
+            return self.llm_stream(messages)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if ("context" in msg or "exceed" in msg) and self._emergency_trim():
+                log("context overflow — emergency-trimmed history, retrying")
+                return self.llm_stream(self.messages)
+            raise
+
+    def agent_turn(self, user_text):
+        if not self.turn_lock.acquire(blocking=False):
+            return
+        try:
+            self.cancel_flag.clear()
+            self.ui.send({"type": "transcript", "text": user_text})
+            self.ui.send({"type": "cot_clear"})
+            self.ui.send({"type": "reply_clear"})
+            self.set_state("thinking")
+
+            # drop image payloads from earlier turns (a stale screenshot is huge
+            # and rarely useful next turn), then trim oldest turns to fit context
+            for m in self.messages:
+                if isinstance(m.get("content"), list):
+                    m["content"] = [p for p in m["content"] if p.get("type") == "text"] \
+                        or [{"type": "text", "text": "[old screen frame omitted]"}]
+            self._fit_context()
+
+            # Durable memory: silently seed this turn with anything relevant we
+            # saved in past sessions. Prefixed into the user turn (rather than a
+            # separate message) so strict user/model alternation is preserved for
+            # templates like gemma that require it.
+            turn = user_text
+            # Only auto-recall once the backend is warm, so a cold embedding-model
+            # load never stalls the turn (explicit remember/recall still waits).
+            if MEMORY_AUTORECALL and self.memory.ready:
+                mem = self.memory.recall_context(user_text)
+                if mem:
+                    turn = mem + "\n\n" + user_text
+                    self.ui.send({"type": "cot", "text": "[recalled memory]\n"})
+            self.messages.append({"role": "user", "content": turn})
+            reply_text = ""
+
+            for _ in range(MAX_TOOL_ROUNDS):
+                content, tool_calls = self._stream_fitting(self.messages)
+                msg = {"role": "assistant", "content": content or None}
+                if tool_calls:
+                    msg["tool_calls"] = tool_calls
+                self.messages.append(msg)
+
+                m = re.search(r"<reply>(.*?)(?:</reply>|$)", content, re.S)
+                if m:
+                    reply_text = m.group(1).strip()
+
+                if not tool_calls:
+                    break
+
+                self.set_state("executing")
+                frames = []
+                for tc in tool_calls:
+                    name = tc["function"]["name"]
+                    try:
+                        args = json.loads(tc["function"]["arguments"] or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    label = f"{name}({json.dumps(args)[1:-1]})"
+                    self.ui.send({"type": "tool", "text": label})
+                    # first real desktop action => reveal the live Stream overlay
+                    if name in ACTION_TOOLS:
+                        self.last_action = label[:120]
+                        self.start_stream()
+                    result = self.run_tool(name, args)
+                    frames += result.pop("_frames", [])
+                    self.messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                          "content": json.dumps(result)})
+                if frames:
+                    parts = [{"type": "text",
+                              "text": f"[{len(frames)} screen frame(s), in capture order]"}]
+                    parts += [{"type": "image_url", "image_url": {"url": f}} for f in frames]
+                    self.messages.append({"role": "user", "content": parts})
+                self.set_state("thinking")
+
+            if not reply_text:
+                # model never used the tag protocol; fall back to full content
+                last = self.messages[-1]
+                if last["role"] == "assistant" and last.get("content"):
+                    reply_text = re.sub(r"<[^>]+>", "", last["content"]).strip()
+                    self.ui.send({"type": "reply", "text": reply_text})
+
+            if reply_text:
+                self.speak(reply_text)
+            self.set_state("idle")
+        except InterruptedError:
+            self.ui.send({"type": "cot", "text": "\n[cancelled]"})
+            self.set_state("idle")
+        except Exception as e:
+            self.error(f"{type(e).__name__}: {e}")
+        finally:
+            self.stop_stream()
+            self.turn_lock.release()
+
+    # ── input events ──────────────────────────────────────────────────
+    def on_toggle(self):
+        if self.state == "idle":
+            self.ui.send({"type": "show"})
+            self.start_recording()
+        elif self.state == "listening":
+            self.set_state("thinking")
+            wav = self.stop_recording()
+            if wav and self.wav_is_silent(wav):
+                self.ui.send({"type": "cot",
+                              "text": f"[mic captured silence — check input '{self.mic_target or 'default'}']"})
+                self.set_state("idle")
+                return
+            text = self.transcribe(wav) if wav else None
+            if not text:
+                self.ui.send({"type": "cot", "text": "[heard nothing]"})
+                self.set_state("idle")
+                return
+            # "activate social mode" → drop into the hands-free chat loop
+            if self.is_enter_conversation(text):
+                self.ui.send({"type": "transcript", "text": text})
+                threading.Thread(target=self.conversation_loop, daemon=True).start()
+                return
+            threading.Thread(target=self.agent_turn, args=(text,), daemon=True).start()
+        else:
+            self.cancel_flag.set()
+
+    def handle(self, msg):
+        t = msg.get("type")
+        # in social mode, F8 / cancel / hide all just leave the conversation
+        if self.conv_active.is_set() and t in ("toggle", "cancel", "hide"):
+            self.conv_exit.set()
+            self.tts_stop.set()
+            return
+        if t == "toggle":
+            self.on_toggle()
+        elif t == "user_text" and msg.get("text", "").strip():
+            if self.state == "listening":
+                self.stop_recording()
+            if self.state in ("idle", "listening"):
+                self.ui.send({"type": "show"})
+                threading.Thread(target=self.agent_turn,
+                                 args=(msg["text"].strip(),), daemon=True).start()
+        elif t == "cancel":
+            if self.state == "listening":
+                self.stop_recording()
+                self.set_state("idle")
+            else:
+                self.cancel_flag.set()
+        elif t == "hide":
+            if self.state == "listening":
+                self.stop_recording()
+            self.cancel_flag.set()
+            self.set_state("idle")
+            self.ui.send({"type": "hide"})
+        elif t == "list_mics":
+            self.send_sources()
+        elif t == "set_mic":
+            name = msg.get("name", "").strip()
+            if name:
+                self.save_mic(name)
+                for s in self.list_sources():
+                    if s["name"] == name:
+                        self.mic_target = s["id"]
+                        break
+                self.ui.send({"type": "mic", "device": name})
+            self.send_sources()
+
+    # ── socket server ─────────────────────────────────────────────────
+    def client_loop(self, conn):
+        self.ui.add(conn)
+        try:
+            conn.sendall((json.dumps({"type": "status", "value": self.state}) + "\n").encode())
+        except OSError:
+            return  # probe clients (the F8 script) disconnect immediately
+        f = conn.makefile("r")
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.handle(json.loads(line))
+            except Exception as e:
+                log("bad client msg", line[:200], e)
+
+    def heartbeat(self):
+        # quickshell's Socket.connected is a desired-state flag, so the UI
+        # detects a dead link by these pings going quiet
+        while True:
+            self.ui.send({"type": "ping"})
+            time.sleep(3)
+
+    def serve(self):
+        try:
+            os.unlink(SOCK_PATH)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(SOCK_PATH)
+        os.chmod(SOCK_PATH, 0o666)
+        srv.listen(8)
+        log("SIVA daemon listening on", SOCK_PATH)
+        threading.Thread(target=self.heartbeat, daemon=True).start()
+        # Warm the memory backend in the background so the embedding model is
+        # loaded by the time the user speaks (cold start is several seconds).
+        if self.memory.available:
+            threading.Thread(target=self.memory.start, daemon=True).start()
+        while True:
+            conn, _ = srv.accept()
+            threading.Thread(target=self.client_loop, args=(conn,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    # Singleton guard: if another instance already holds the lock, exit
+    # quietly. Prevents the toggle-script respawn path from stacking
+    # daemons that steal each other's socket via unlink+rebind.
+    import fcntl
+    _singleton_lock = open("/tmp/siva-daemon.lock", "w")
+    try:
+        fcntl.flock(_singleton_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(0)
+    Siva().serve()

@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""SIVA wake-word enrollment daemon.
+
+Guides the user through recording "Siva" wake-word samples via the
+SivaEnroll.qml quickshell overlay, saves every take to ~/Voice_Data
+(48 kHz masters + LJSpeech-style metadata.csv for future voice-model
+training), then trains the speaker-specific wake-word verifier used by
+siva-wake.
+
+Socket: /tmp/siva-enroll.sock (newline JSON)
+  daemon -> UI: {"type":"ping"} {"type":"show"|"hide"}
+                {"type":"enroll","phase":"welcome|prompt|countdown|recording|
+                 saved|training|done|error","step":N,"total":N,
+                 "text":"...","detail":"...","count":3}
+  UI -> daemon: {"type":"start"} {"type":"cancel"} {"type":"hide"}
+"""
+import array
+import contextlib
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import wave
+
+sys.path.insert(0, os.path.expanduser("~/.local/share/siva/pylib"))
+
+SOCK_PATH = "/tmp/siva-enroll.sock"
+VOICE_DIR = os.path.expanduser("~/Voice_Data")
+PIPER_VOICE = os.path.expanduser("~/.local/share/siva/piper/en_US-lessac-medium.onnx")
+
+# (kind, seconds, spoken text) — positives start with the wake word,
+# negatives teach the verifier what ordinary speech looks like.
+STEPS = [
+    ("pos", 4, "Siva."),
+    ("pos", 4, "Siva, what's on my screen right now?"),
+    ("pos", 4, "Siva, open my web browser."),
+    ("pos", 4, "Hey Siva, switch to my terminal."),
+    ("pos", 4, "Siva, are you there?"),
+    ("neg", 4, "Open my web browser please."),
+    ("neg", 4, "What's the weather like today?"),
+    ("neg", 4, "See you tomorrow — save the file."),
+    ("ambient", 6, ""),
+]
+
+FILLER_NEGATIVES = [
+    "Turn the volume up a little bit.",
+    "I think we should refactor this function.",
+    "The quick brown fox jumps over the lazy dog.",
+    "Let's grab lunch after this meeting.",
+    "Seven eight nine ten eleven twelve.",
+    "Can you scroll down to the bottom of the page?",
+    "This is just some ordinary background speech.",
+    "Never mind, I found it myself.",
+    # hard negatives — phonetic neighbours of "Siva"
+    "Give her a second to finish up.",
+    "I'd love to see a movie tonight.",
+    "The sea was calm this evening.",
+    "That receiver needs a new cable.",
+    "Come see for yourself later.",
+]
+
+
+def log(*a):
+    print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
+
+
+def sh(cmd, timeout=30, **kw):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except Exception as e:
+        return 1, str(e)
+
+
+class Broadcaster:
+    def __init__(self):
+        self.clients = []
+        self.lock = threading.Lock()
+
+    def add(self, conn):
+        with self.lock:
+            self.clients.append(conn)
+
+    def send(self, obj):
+        data = (json.dumps(obj) + "\n").encode()
+        with self.lock:
+            dead = []
+            for c in self.clients:
+                try:
+                    c.sendall(data)
+                except OSError:
+                    dead.append(c)
+            for c in dead:
+                self.clients.remove(c)
+
+
+class Enroll:
+    def __init__(self):
+        self.ui = Broadcaster()
+        self.cancel = threading.Event()
+        self.running = threading.Lock()
+
+    def emit(self, phase, step=0, text="", detail="", count=0):
+        self.ui.send({"type": "enroll", "phase": phase, "step": step,
+                      "total": len(STEPS), "text": text, "detail": detail,
+                      "count": count})
+
+    # ── audio helpers (same mic logic as siva-daemon) ─────────────────
+    def find_mic(self):
+        _, out = sh(["wpctl", "status"])
+        in_sources = False
+        for line in out.splitlines():
+            if "Sources:" in line:
+                in_sources = True
+                continue
+            if not in_sources:
+                continue
+            m = re.search(r"(\d+)\.\s+(.+?)\s*\[vol", line)
+            if not m:
+                in_sources = False
+                continue
+            if re.search(r"scarlett|focusrite", m.group(2), re.I):
+                return m.group(1)
+        return None
+
+    @staticmethod
+    def _wav_peak(path):
+        """Peak |sample| of a WAV — 0 for digital silence / a dead capture."""
+        try:
+            with contextlib.closing(wave.open(path, "rb")) as w:
+                if w.getsampwidth() != 2:
+                    return 1 << 15  # unknown width — don't second-guess it
+                frames = w.readframes(min(w.getnframes(), w.getframerate() * 6))
+            s = array.array("h", frames[: len(frames) // 2 * 2])
+            return max((abs(x) for x in s), default=0)
+        except Exception:
+            return 1 << 15
+
+    def _capture_once(self, path, seconds, rate):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        cmd = ["pw-record", "--format", "s16", "--rate", str(rate),
+               "--channels", "1", path]
+        mic = self.find_mic()
+        if mic:
+            cmd[1:1] = ["--target", mic]
+        p = subprocess.Popen(cmd)
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            if self.cancel.is_set():
+                break
+            time.sleep(0.05)
+        p.send_signal(signal.SIGINT)
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        return os.path.exists(path) and os.path.getsize(path) > 8000
+
+    def record(self, path, seconds, rate=48000, require_audio=True):
+        """Capture `seconds` of audio to `path`. pw-record sometimes attaches
+        to a dead capture stream that yields only digital silence (the same
+        failure the daemon guards against) — which is how a wake model once got
+        trained on pure silence and then false-fired on everything. So for
+        spoken takes we verify the clip actually carries signal and bounce the
+        recorder if it doesn't; ambient (room-tone) takes are allowed silent."""
+        for attempt in range(3):
+            if self.cancel.is_set():
+                return False
+            if not self._capture_once(path, seconds, rate):
+                continue
+            if not require_audio or self._wav_peak(path) >= 200:
+                return True
+            log(f"{os.path.basename(path)} came back silent (dead capture) — "
+                f"retry {attempt + 1}/3")
+            self.emit("recording", 0, "No sound captured — retrying…",
+                      "the mic returned silence; hold on")
+            time.sleep(0.4)
+        return False
+
+    def beep(self):
+        sh(["pw-play", "/tmp/siva-enroll-beep.wav"], timeout=3)
+
+    # ── the guided session ────────────────────────────────────────────
+    def session(self):
+        if not self.running.acquire(blocking=False):
+            return
+        try:
+            self.cancel.clear()
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            sh(["sox", "-n", "/tmp/siva-enroll-beep.wav",
+                "synth", "0.12", "sine", "880", "vol", "0.3"])
+            meta = []
+            counters = {"pos": 0, "neg": 0, "ambient": 0}
+
+            for i, (kind, secs, text) in enumerate(STEPS, 1):
+                if self.cancel.is_set():
+                    return
+                counters[kind] += 1
+                name = f"enroll_{kind}_{counters[kind]:02d}.wav"
+                path = os.path.join(VOICE_DIR, name)
+
+                if kind == "ambient":
+                    self.emit("prompt", i, "Stay quiet…",
+                              "sampling your room's background noise")
+                else:
+                    say = "Say naturally:" if kind == "pos" else \
+                          "Now WITHOUT the wake word — say:"
+                    self.emit("prompt", i, f"“{text}”", say)
+                time.sleep(2.2)
+
+                for c in (3, 2, 1):
+                    if self.cancel.is_set():
+                        return
+                    self.emit("countdown", i, f"“{text}”" if text else "Stay quiet…",
+                              "", c)
+                    time.sleep(0.8)
+                self.beep()
+                self.emit("recording", i, f"“{text}”" if text else "Recording room tone…",
+                          "recording — speak now" if text else "")
+                if not self.record(path, secs, require_audio=(kind != "ambient")):
+                    self.emit("error", i, "Recording failed",
+                              "mic returned only silence after retries — check "
+                              "your input device/levels and start again")
+                    return
+                if text:
+                    meta.append(f"{name.removesuffix('.wav')}|{text}")
+                self.emit("saved", i, "Saved ✓", name)
+                time.sleep(0.8)
+
+            with open(os.path.join(VOICE_DIR, "metadata.csv"), "w") as f:
+                f.write("\n".join(meta) + "\n")
+
+            self.emit("training", len(STEPS), "Training wake-word model…",
+                      "extracting embeddings from your voice")
+            ok, detail = self.train()
+            if ok:
+                self.emit("done", len(STEPS), "Wake word ready 󱚥",
+                          detail + " — say “Siva” to summon me. Esc to close.")
+                self.restart_wake_listener()
+            else:
+                self.emit("error", len(STEPS), "Training failed", detail)
+        finally:
+            self.running.release()
+
+    # ── training ──────────────────────────────────────────────────────
+    def train(self):
+        try:
+            import numpy as np
+            from sklearn.linear_model import LogisticRegression
+            import siva_wake_common as swc
+
+            work = "/tmp/siva-enroll-16k"
+            os.makedirs(work, exist_ok=True)
+
+            def to16k(src):
+                dst = os.path.join(work, os.path.basename(src))
+                sh(["sox", src, "-r", "16000", "-c", "1", "-b", "16", dst])
+                return dst
+
+            # piper filler negatives so "any speech" doesn't trigger it
+            fillers = []
+            if os.path.exists(PIPER_VOICE):
+                for n, phrase in enumerate(FILLER_NEGATIVES):
+                    raw = os.path.join(work, f"filler_{n:02d}_raw.wav")
+                    rc, _ = sh(["piper", "--model", PIPER_VOICE,
+                                "--output_file", raw], input=phrase, timeout=60)
+                    if rc == 0:
+                        fillers.append(to16k(raw))
+
+            feats = swc.make_features()
+            pos, neg = [], []
+            for f in sorted(os.listdir(VOICE_DIR)):
+                if not f.endswith(".wav"):
+                    continue
+                src = os.path.join(VOICE_DIR, f)
+                # never let a silent positive poison the model (see record())
+                if f.startswith("enroll_pos") and self._wav_peak(src) < 200:
+                    log(f"skipping silent positive {f}")
+                    continue
+                emb = swc.clip_embeddings(feats, to16k(src))
+                if f.startswith("enroll_pos"):
+                    pos += swc.positive_windows(emb)
+                else:
+                    neg += swc.all_windows(emb)
+            for f in fillers:
+                neg += swc.all_windows(swc.clip_embeddings(feats, f))
+
+            if len(pos) < 10:
+                return False, f"only {len(pos)} positive windows — record again"
+
+            X = np.array(pos + neg, dtype=np.float32)
+            y = np.array([1] * len(pos) + [0] * len(neg))
+            clf = LogisticRegression(random_state=0, max_iter=2000, C=0.001,
+                                     class_weight="balanced")
+            clf.fit(X, y)
+
+            ps = clf.predict_proba(np.array(pos, dtype=np.float32))[:, 1]
+            ns = clf.predict_proba(np.array(neg, dtype=np.float32))[:, 1]
+            # confusable words score well above ordinary speech, so keep a
+            # high floor and hang just under the typical positive score
+            thr = min(0.92, max(0.8, float(np.percentile(ps, 20)) - 0.15))
+            swc.save_verifier(clf, thr, {
+                "pos_windows": len(pos), "neg_windows": len(neg),
+                "pos_p20": float(np.percentile(ps, 20)),
+                "neg_p99.5": float(np.percentile(ns, 99.5)),
+            })
+            log(f"trained: {len(pos)} pos / {len(neg)} neg windows, thr={thr:.2f}")
+            return True, f"threshold {thr:.2f}, {len(pos)}/{len(neg)} windows"
+        except Exception as e:
+            log("train error:", repr(e))
+            return False, f"{type(e).__name__}: {e}"
+
+    def restart_wake_listener(self):
+        _, out = sh(["pgrep", "-f", "python3 .*/siva-wake"])
+        for pid in out.split():
+            sh(["kill", pid])
+        subprocess.Popen(["setsid", "-f", os.path.expanduser("~/.local/bin/siva-wake")],
+                         stdout=open("/tmp/siva-wake.log", "ab"),
+                         stderr=subprocess.STDOUT)
+
+    # ── socket server ─────────────────────────────────────────────────
+    def handle(self, msg):
+        t = msg.get("type")
+        if t == "start":
+            threading.Thread(target=self.session, daemon=True).start()
+        elif t == "cancel":
+            self.cancel.set()
+        elif t == "hide":
+            self.cancel.set()
+            self.ui.send({"type": "hide"})
+
+    def client_loop(self, conn):
+        self.ui.add(conn)
+        try:
+            conn.sendall(b'{"type": "show"}\n')
+            self.emit("welcome", 0, "SIVA voice enrollment",
+                      f"{len(STEPS)} short recordings — press Enter to begin")
+        except OSError:
+            return
+        f = conn.makefile("r")
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.handle(json.loads(line))
+            except Exception as e:
+                log("bad msg", line[:200], e)
+
+    def heartbeat(self):
+        while True:
+            self.ui.send({"type": "ping"})
+            time.sleep(3)
+
+    def serve(self):
+        try:
+            os.unlink(SOCK_PATH)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(SOCK_PATH)
+        os.chmod(SOCK_PATH, 0o666)
+        srv.listen(4)
+        log("enrollment daemon on", SOCK_PATH)
+        threading.Thread(target=self.heartbeat, daemon=True).start()
+        while True:
+            conn, _ = srv.accept()
+            threading.Thread(target=self.client_loop, args=(conn,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    Enroll().serve()
