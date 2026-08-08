@@ -32,7 +32,6 @@
     hashcat
     wireshark
     wireshark-cli
-    termshark
 
     # ---- containers ----
     docker
