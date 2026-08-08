@@ -78,8 +78,9 @@ spawn-at-startup "waybar"
 spawn-at-startup "mako"
 spawn-at-startup "wl-paste" "--watch" "cliphist" "store"
 spawn-at-startup "qs"
-// $HOME is expanded by the shell rather than hardcoded, so the same config
-// works for any user.
+// Wallpaper. Home Manager materialises this file from the repo
+// (assets/wallpapers/wallpaper.jpg); $HOME is expanded by the shell rather
+// than hardcoded so the same config works for any user.
 spawn-at-startup "sh" "-c" "exec swaybg -m fill -i \"$HOME/Pictures/Wallpaper/wallpaper.jpg\""
 
 // SIVA voice assistant stack (F7 voicefetch, F8 assistant, F9 dictation)

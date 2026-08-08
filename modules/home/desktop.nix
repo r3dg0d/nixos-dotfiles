@@ -1,5 +1,5 @@
-# Desktop dotfiles: the live-editable config symlinks, Ghostty, the cursor
-# theme and default applications.
+# Desktop dotfiles: the live-editable config symlinks, cursor theme, default
+# applications, the wallpaper, and Ghostty.
 { config, lib, pkgs, osConfig, ... }:
 
 let
@@ -11,8 +11,27 @@ let
   dotfiles = "${osConfig.my.dotfilesDir}/config";
   liveLink = path: config.lib.file.mkOutOfStoreSymlink path;
 
+  # …the wallpaper, in contrast, is a real store copy: it should exist and be
+  # correct on a fresh machine before the repo is even cloned to its final
+  # location.
+  wallpaper = ../../assets/wallpapers/wallpaper.jpg;
+  wallpaperTarget = "Pictures/Wallpaper/wallpaper.jpg";
+  wallpaperPath = "${config.home.homeDirectory}/${wallpaperTarget}";
 in
 {
+  # ---- wallpaper -----------------------------------------------------------
+  # The canonical copy lives in the repository (assets/wallpapers). Home
+  # Manager materialises it at the path both compositors are pointed at.
+  home.file.${wallpaperTarget}.source = wallpaper;
+
+  # niri draws it with swaybg (see config/niri/config.kdl). COSMIC has its own
+  # background daemon, configured here so the same image shows up in both
+  # sessions. Schema is cosmic-bg's RON config; `same-on-all` makes the one
+  # `all` entry cover every output.
+  #
+  # NOTE: the cosmic block makes COSMIC Settings > Wallpaper read-only (it
+  # cannot write to a store symlink). Drop it if you would rather pick
+  # wallpapers from the GUI.
   xdg.configFile = lib.mkMerge [
     # ---- live-editable configs --------------------------------------------
     (lib.genAttrs
@@ -23,6 +42,22 @@ in
       }))
 
     {
+      # ---- COSMIC background ----------------------------------------------
+      # cosmic-bg's RON config; `same-on-all` makes the one `all` entry cover
+      # every output.
+      "cosmic/com.system76.CosmicBackground/v1/same-on-all".text = "true";
+      "cosmic/com.system76.CosmicBackground/v1/all".text = ''
+        (
+            output: "all",
+            source: Path("${wallpaperPath}"),
+            filter_by_theme: true,
+            rotation_frequency: 300,
+            filter_method: Lanczos,
+            scaling_mode: Zoom,
+            sampling_method: Alphanumeric,
+        )
+      '';
+
       # ---- Ghostty ---------------------------------------------------------
       # Written as a plain config file rather than through programs.ghostty so
       # it does not depend on that module existing in a given Home Manager
