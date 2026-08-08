@@ -433,7 +433,7 @@ a few Flatpaks, plus flake inputs and vendored derivations.
 | App | Source | Use |
 |-----|--------|-----|
 | **DaVinci Resolve** 21 | vendored ([`pkgs/davinci-resolve.nix`](pkgs/davinci-resolve.nix)) | Video editing (NVENC on the 4090) |
-| OBS Studio (CUDA/NVENC) | nixpkg module | Screen recording (wlrobs on niri) |
+| OBS Studio (CUDA/NVENC) | nixpkg module | Screen recording (wlrobs on niri, ONNX background removal) |
 | Blender | **Flatpak** `org.blender.Blender` | 3D |
 | mpv · Jellyfin (server + client) | nixpkg | Playback · home media |
 | mpd + rmpc · EasyEffects | nixpkg | Music daemon + TUI · PipeWire effects |

@@ -67,6 +67,7 @@
       obs-3d-effect
       obs-advanced-masks
       obs-stroke-glow-shadow
+      obs-backgroundremoval # ONNX portrait segmentation (green-screen-less bg removal)
     ];
   };
 
