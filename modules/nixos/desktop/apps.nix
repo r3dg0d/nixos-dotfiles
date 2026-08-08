@@ -19,7 +19,6 @@
     libretranslate # Google Translate replacement
     obsidian
     vscodium # Coding IDE
-    gnome-text-editor
     simplex-chat-desktop
     coyim
     irssi

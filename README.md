@@ -101,6 +101,19 @@ palette — down to the zsh syntax highlighting, the
 **COSMIC** is installed alongside niri rather than instead of it. Both register
 a Wayland session, and you choose between them at the login screen.
 
+GTK apps follow the same dark palette: `adw-gtk3-dark` with `Papirus-Dark`
+icons. GTK4/libadwaita apps — Nautilus above all — ignore `gtk.theme` and read
+the XDG colour-scheme preference instead, so `color-scheme = prefer-dark` is
+set in dconf as well; without it Nautilus stays light. niri has no desktop
+environment to answer the Settings portal, so that is routed to the GTK
+backend ([`modules/nixos/desktop/portals.nix`](modules/nixos/desktop/portals.nix))
+to get the preference out to Flatpaks and portal-aware apps.
+
+Default applications ([`modules/home/desktop.nix`](modules/home/desktop.nix)):
+ungoogled-chromium for web, **mpv** for audio and video, **imv** for images,
+**COSMIC Edit** for text. Every mime type is enumerated explicitly — declaring
+an association in a `.desktop` is not the same as being the default for it.
+
 ## 🔐 SDDM login theme — `sddm-ascii-city`
 
 ![SDDM theme](assets/sddm.png)
@@ -450,7 +463,8 @@ cross-compilers — and the local AI stack: `ollama-cuda`, `llama.cpp` (CUDA),
 
 ### Rice runtime
 Ghostty · rofi · waybar · quickshell · mako · swaybg · fastfetch · starship ·
-cliphist · Bibata cursors · JetBrains Mono Nerd Font.
+cliphist · Bibata cursors · JetBrains Mono Nerd Font · adw-gtk3-dark +
+Papirus-Dark for GTK.
 
 ---
 
@@ -469,7 +483,8 @@ cliphist · Bibata cursors · JetBrains Mono Nerd Font.
 ├── modules/
 │   ├── nixos/                   # everything PORTABLE
 │   │   ├── options.nix          #   my.username / my.homeDirectory / my.dotfilesDir
-│   │   ├── core.nix             #   nix, kernel, the user, shells, fonts, logind
+│   │   ├── core.nix             #   nix, kernel, the user, shells, fonts, logind,
+│   │   │                        #   NTFS support for the external backup SSD
 │   │   ├── networking.nix       #   NetworkManager, Mullvad DNS, lokinet
 │   │   ├── audio.nix            #   PipeWire + WirePlumber
 │   │   ├── hardware/nvidia.nix
