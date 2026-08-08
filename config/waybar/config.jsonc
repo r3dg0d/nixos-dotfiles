@@ -45,7 +45,7 @@
   },
 
   "image#albumart": {
-    "exec": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py art",
+    "exec": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py art",
     "size": 22,
     "interval": 3,
     "tooltip": false
@@ -54,13 +54,13 @@
   // Long-running: blocks on MPD `idle` and reprints instantly on any change,
   // so there is no polling lag on the track name.
   "custom/music": {
-    "exec": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py watch",
+    "exec": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py watch",
     "return-type": "json",
     "max-length": 38,
     "escape": true,
-    "on-click": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py toggle",
-    "on-scroll-up": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py next",
-    "on-scroll-down": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py prev"
+    "on-click": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py toggle",
+    "on-scroll-up": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py next",
+    "on-scroll-down": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py prev"
   },
 
   "cava": {
@@ -76,26 +76,26 @@
   },
 
   "custom/music-play": {
-    "exec": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py playicon",
+    "exec": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py playicon",
     "return-type": "json",
     "interval": 2,
     "signal": 10,
-    "on-click": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py toggle"
+    "on-click": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py toggle"
   },
 
   "custom/music-next": {
     "format": "\uf051",
     "tooltip": true,
     "tooltip-format": "Next track",
-    "on-click": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py next"
+    "on-click": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py next"
   },
 
   "custom/music-loop": {
-    "exec": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py loopicon",
+    "exec": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py loopicon",
     "return-type": "json",
     "interval": 2,
     "signal": 11,
-    "on-click": "/run/current-system/sw/bin/python3 /home/r3dg0d/nixos-dotfiles/config/scripts/music/mpd-widget.py loop"
+    "on-click": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py loop"
   },
 
   "clock": {
@@ -151,7 +151,7 @@
     "format": "{icon} {volume}%",
     "format-muted": " muted",
     "format-icons": { "default": ["", "", ""] },
-    "on-click": "ratty -T 'Audio Switcher' -e /etc/profiles/per-user/r3dg0d/bin/node /home/r3dg0d/nixos-dotfiles/config/scripts/audio-switcher/cli.js",
+    "on-click": "ratty -T 'Audio Switcher' -e node $HOME/nixos-dotfiles/config/scripts/audio-switcher/cli.js",
     "on-click-right": "pavucontrol"
   },
 
@@ -161,11 +161,11 @@
   },
 
   "custom/mirror": {
-    "exec": "/home/r3dg0d/nixos-dotfiles/config/quickshell/Mirror/scripts/mirror-status",
+    "exec": "$HOME/nixos-dotfiles/config/quickshell/Mirror/scripts/mirror-status",
     "return-type": "json",
     "interval": 2,
     "signal": 12,
-    "on-click": "/home/r3dg0d/nixos-dotfiles/config/quickshell/Mirror/scripts/mirror-toggle",
+    "on-click": "$HOME/nixos-dotfiles/config/quickshell/Mirror/scripts/mirror-toggle",
     "tooltip": true
   },
 

@@ -78,16 +78,18 @@ spawn-at-startup "waybar"
 spawn-at-startup "mako"
 spawn-at-startup "wl-paste" "--watch" "cliphist" "store"
 spawn-at-startup "qs"
-spawn-at-startup "swaybg" "-m" "fill" "-i" "/home/r3dg0d/Pictures/Wallpaper/wallpaper.jpg"
+// $HOME is expanded by the shell rather than hardcoded, so the same config
+// works for any user.
+spawn-at-startup "sh" "-c" "exec swaybg -m fill -i \"$HOME/Pictures/Wallpaper/wallpaper.jpg\""
 
 // SIVA voice assistant stack (F7 voicefetch, F8 assistant, F9 dictation)
-// siva-llm runs as a systemd user service (Restart=on-failure) — see home.nix
-spawn-at-startup "/home/r3dg0d/.local/bin/siva-daemon"
+// siva-llm runs as a systemd user service (Restart=on-failure) — see modules/home
+spawn-at-startup "sh" "-c" "exec \"$HOME/.local/bin/siva-daemon\""
 // always-on "Hey SIVA" wake word listener (two-stage: openWakeWord + whisper
 // confirmation). Waits politely until the verifier is trained (siva-enroll).
-spawn-at-startup "/home/r3dg0d/.local/bin/siva-wake"
-spawn-at-startup "/home/r3dg0d/.local/bin/siva-voicefetch-daemon"
-spawn-at-startup "/home/r3dg0d/.local/bin/siva-type-daemon"
+spawn-at-startup "sh" "-c" "exec \"$HOME/.local/bin/siva-wake\""
+spawn-at-startup "sh" "-c" "exec \"$HOME/.local/bin/siva-voicefetch-daemon\""
+spawn-at-startup "sh" "-c" "exec \"$HOME/.local/bin/siva-type-daemon\""
 
 prefer-no-csd
 
@@ -112,7 +114,7 @@ binds {
     Mod+Space        { spawn "rofi" "-show" "drun"; }
     Mod+D            { spawn "rofi" "-show" "drun"; }
     Mod+Shift+D      { spawn "rofi" "-show" "run"; }
-    Mod+E            { spawn "/home/r3dg0d/nixos-dotfiles/config/scripts/emojipick-rofi.sh"; }
+    Mod+E            { spawn "sh" "-c" "exec \"$HOME/nixos-dotfiles/config/scripts/emojipick-rofi.sh\""; }
     Mod+N            { spawn "nautilus"; }
 
     // Window management
@@ -127,13 +129,13 @@ binds {
 
     // SIVA voice assistant stack
     F7 repeat=false hotkey-overlay-title="SIVA Voicefetch: voice models (toggle)" {
-        spawn "/home/r3dg0d/.local/bin/siva-voicefetch";
+        spawn "sh" "-c" "exec \"$HOME/.local/bin/siva-voicefetch\"";
     }
     F8 repeat=false hotkey-overlay-title="SIVA: voice assistant (push-to-talk toggle)" {
-        spawn "/home/r3dg0d/.local/bin/siva";
+        spawn "sh" "-c" "exec \"$HOME/.local/bin/siva\"";
     }
     F9 repeat=false hotkey-overlay-title="SIVA-Type: AI dictation (toggle)" {
-        spawn "/home/r3dg0d/.local/bin/siva-type";
+        spawn "sh" "-c" "exec \"$HOME/.local/bin/siva-type\"";
     }
 
     // Focus movement
