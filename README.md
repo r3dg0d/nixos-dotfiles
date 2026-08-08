@@ -193,10 +193,12 @@ info. Pulled in as the `areofyl-fetch` flake input. Ghostty is `$TERMINAL` and
 
 ![Waybar](assets/waybar.png)
 
-Workspaces and focused-window title on the left, clock in the center, and a
-status cluster on the right — weather, temperatures, volume, network, CPU and
-memory, an MPD player widget, a [system-update indicator](#the-waybar-widget),
-the Mirror toggle, and a power button that opens the quickshell power menu.
+Workspaces and focused-window title on the left. In the center, an MPD player
+widget — album art, track, a cava visualiser, and previous / play-pause / next /
+loop transport buttons — next to the clock. On the right, a status cluster:
+weather, temperatures, volume, network, CPU and memory, a
+[system-update indicator](#the-waybar-widget), the Mirror toggle, and a power
+button that opens the quickshell power menu.
 
 ## 🪟 Quickshell widgets
 

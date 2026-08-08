@@ -38,6 +38,7 @@
       "image#albumart",
       "custom/music",
       "cava",
+      "custom/music-prev",
       "custom/music-play",
       "custom/music-next",
       "custom/music-loop"
@@ -81,6 +82,13 @@
     "interval": 2,
     "signal": 10,
     "on-click": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py toggle"
+  },
+
+  "custom/music-prev": {
+    "format": "\uf048",
+    "tooltip": true,
+    "tooltip-format": "Previous track",
+    "on-click": "python3 $HOME/nixos-dotfiles/config/scripts/music/mpd-widget.py prev"
   },
 
   "custom/music-next": {

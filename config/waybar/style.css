@@ -184,6 +184,7 @@ window#waybar {
   text-shadow: 0 0 5px #00ff41;
 }
 
+#custom-music-prev,
 #custom-music-play,
 #custom-music-next,
 #custom-music-loop {
@@ -192,6 +193,7 @@ window#waybar {
   border-radius: 6px;
 }
 
+#custom-music-prev:hover,
 #custom-music-play:hover,
 #custom-music-next:hover,
 #custom-music-loop:hover {

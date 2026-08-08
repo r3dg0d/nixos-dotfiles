@@ -1,8 +1,18 @@
 # Long-running system services that are part of the desktop but not part of
-# any one session: media server, private metasearch, VR streaming.
+# any one session: media server, private metasearch, VR streaming, firmware.
 { config, pkgs, ... }:
 
 {
+  # Firmware updates via LVFS. This is what turns the `firmware` section of
+  # `nixos-update-check` from "skipped" into a real answer — the checker looks
+  # for fwupdmgr on PATH and reports what `get-updates` finds.
+  #
+  # Checking is free and safe; *applying* is not, which is why `nixos-update`
+  # leaves it out of the default run and only touches firmware when asked with
+  # --firmware. Flashing is the one step here that a bad outcome cannot be
+  # rolled back with a boot-menu entry.
+  services.fwupd.enable = true;
+
   # Jellyfin media server — stream movies/TV from this PC to the TV.
   # openFirewall opens 8096 (web UI/API) + 8920 (HTTPS) TCP and UDP
   # 1900/7359 for DLNA + client auto-discovery on the LAN. The service runs
