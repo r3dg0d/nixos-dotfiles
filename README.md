@@ -167,11 +167,14 @@ injects and asserts on what the selector actually resolved to.)
 
 ![fetch](assets/fetch.png)
 
-The terminal is [ratty](https://github.com/orhun/ratty) (GPU-rendered, with
-inline 3D graphics), running [areofyl/fetch](https://github.com/areofyl/fetch)
-— a neofetch-style tool that spins a **3D ASCII distro logo** next to the
-system info. Pulled in as the `areofyl-fetch` flake input.
-[Ghostty](https://ghostty.org/) is installed alongside it, themed to match.
+The terminal is [Ghostty](https://ghostty.org/) — GPU-accelerated, with custom
+shader support — running [areofyl/fetch](https://github.com/areofyl/fetch), a
+neofetch-style tool that spins a **3D ASCII distro logo** next to the system
+info. Pulled in as the `areofyl-fetch` flake input. Ghostty is `$TERMINAL` and
+`Mod+Return`; alacritty stays on `Mod+Shift+Return` as a fallback.
+
+> The screenshot was taken in ratty, which Ghostty replaced.
+> _TODO: retake it._
 
 ## 🧰 Waybar
 
@@ -397,10 +400,6 @@ To change it, replace the file in `assets/wallpapers/` and rebuild.
   [siva-type](https://github.com/r3dg0d/siva-type) +
   [siva-voicefetch](https://github.com/r3dg0d/siva-voicefetch)
 - **[sddm-ascii-city](https://github.com/r3dg0d/sddm-ascii-city)** — the login theme
-- **[tuiweb](#-portability)** — a TUI-only web browser
-- **Deep eboy voice** — a PipeWire filter-chain virtual mic (downward expander →
-  shelving EQ → gain) in [`hosts/nixos-btw`](hosts/nixos-btw), selectable in
-  Discord/OBS
 
 ## 📦 Daily-driver software
 
@@ -413,8 +412,8 @@ a few Flatpaks, plus flake inputs and vendored derivations.
 | [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) | nixpkg | Primary browser (defaults to local SearXNG via managed policy) |
 | Firefox / Tor Browser | nixpkg | Secondary / anonymous browsing |
 | FreeTube | nixpkg | Privacy-friendly YouTube client |
+| browsh | nixpkg | Text-mode browsing in the terminal (drives a headless Firefox) |
 | Thunderbird | nixpkg | Email (Gmail replacement) |
-| Vesktop | nixpkg | Discord (Vencord baked in) |
 | SimpleX Chat · CoyIM · irssi | nixpkg | Private messaging · XMPP/OTR · IRC |
 
 ### Creative & media
@@ -436,22 +435,22 @@ a few Flatpaks, plus flake inputs and vendored derivations.
 | WiVRn | nixpkg module | OpenXR streaming to a standalone headset |
 
 ### Productivity
-Obsidian · OnlyOffice · etesync-dav (calendar) · LibreTranslate.
+Obsidian · etesync-dav (calendar) · LibreTranslate.
 
 ### Privacy & security
 Mullvad VPN + encrypted Mullvad DNS (ad/tracker blocking) · Lokinet (`.loki`,
 custom-fixed build) · KeePassXC · Monero · qBittorrent · self-hosted SearXNG ·
-Wireshark/termshark · sqlmap · smap · hashcat.
+Wireshark · sqlmap · smap · hashcat.
 
 ### Dev & local AI
-Claude Code · OpenCode · Codex · Antigravity · VSCodium · Neovim · gh · Docker ·
+Claude Code · OpenCode · Codex · VSCodium · Neovim · gh · Docker ·
 libvirt/QEMU + virt-manager · the Android SDK/NDK · ARM64 and i686-mingw32
 cross-compilers — and the local AI stack: `ollama-cuda`, `llama.cpp` (CUDA),
 `whisper.cpp`, `piper-tts`, MemPalace.
 
 ### Rice runtime
-ratty · Ghostty · rofi · waybar · quickshell · mako · swaybg · fastfetch ·
-starship · cliphist · Bibata cursors · JetBrains Mono Nerd Font.
+Ghostty · rofi · waybar · quickshell · mako · swaybg · fastfetch · starship ·
+cliphist · Bibata cursors · JetBrains Mono Nerd Font.
 
 ---
 
@@ -493,7 +492,7 @@ starship · cliphist · Bibata cursors · JetBrains Mono Nerd Font.
 ├── assets/wallpapers/           # the canonical wallpaper
 └── config/                      # dotfiles symlinked live into ~/.config
                                  #   (niri, waybar, quickshell, rofi, mako, mpv,
-                                 #    rmpc, nvim, ratty, fastfetch, scripts)
+                                 #    rmpc, nvim, fastfetch, scripts)
 ```
 
 Two deliberate rules shape this:
@@ -511,10 +510,11 @@ Two deliberate rules shape this:
 - **[nixpkgs](https://github.com/NixOS/nixpkgs)** `nixos-26.05` +
   **[home-manager](https://github.com/nix-community/home-manager)** `release-26.05`
 - **[areofyl/fetch](https://github.com/areofyl/fetch)** — the animated 3D `fetch`
-- **tuiweb** — a local checkout (see [Portability](#-portability))
-- Overlays: everything in [`pkgs/`](pkgs), plus `ratty` pinned to v0.5.0
-  (Wayland clipboard fix) and `lokinet` patched to build from source (nixpkgs
-  marks it broken)
+- Overlays: everything in [`pkgs/`](pkgs), plus `lokinet` patched to build from
+  source (nixpkgs marks it broken)
+
+Every input is fetchable from the network, so a clone of this repository is all
+a fresh machine needs.
 
 ## 🧳 Portability
 
@@ -532,12 +532,9 @@ cp hosts/nixos-btw/default.nix hosts/newbox/default.nix   # then trim it
 `install.sh` generates that machine's own `hardware-configuration.nix` and will
 **not** overwrite one whose UUIDs already resolve locally.
 
-> **One caveat:** the `tuiweb` flake input is
-> `git+file:///home/r3dg0d/Projects/tuiweb` — a local checkout with no remote,
-> so it cannot be fetched on another machine. `install.sh` detects this up front
-> and tells you exactly what to do rather than letting nix fail deep in eval.
-> Either clone tuiweb to that path, or delete the input from `flake.nix`, drop
-> `tuiweb` from `modules/nixos/desktop/apps.nix`, and re-lock.
+There are no local-path flake inputs, so nothing has to exist outside the
+clone. (`install.sh` still checks for `git+file://` inputs and reports a
+missing checkout up front, in case one is ever added.)
 
 ## 🔑 Secrets
 
@@ -558,9 +555,6 @@ nix flake update                          # all inputs
 nix flake update nixpkgs                  # just one
 sudo nixos-rebuild switch --flake .#nixos-btw
 ```
-
-Changed something in a local flake input (e.g. tuiweb)? Commit it there first,
-then `nix flake update tuiweb` here.
 
 ## 🩺 Troubleshooting
 
