@@ -73,6 +73,7 @@
             nixos-updater
             linux-mainline
             helium
+            video2x
             sddm-ascii-city
             siva
             siva-type

@@ -39,6 +39,14 @@ final: prev: {
   # Helium browser — AppImage-only upstream, Ozone-Wayland wrapped like Hydra.
   helium = final.callPackage ./helium.nix { };
 
+  # Video2X upscaler. This *shadows* nixpkgs' own video2x (also 6.4.0, built
+  # from source) on purpose: that build's ffmpeg has no libplacebo filter, so
+  # `-p libplacebo` dies with "Filter not found" — and libplacebo is the one
+  # backend fast enough for feature-length material (~100 FPS vs 1–20 for the
+  # ncnn models). Upstream's AppImage carries its own ffmpeg and does support
+  # it, and it also gets a .desktop entry and icon, which nixpkgs' ships none of.
+  video2x = final.callPackage ./video2x.nix { };
+
   # ---- toolchains -------------------------------------------------------
   mingw32-cc = final.callPackage ./mingw32-cc.nix { };
 

@@ -1,0 +1,85 @@
+#!@bash@
+# Interactive front-end for the video2x CLI, used by the Video2X launcher entry.
+# Upstream's AppImage has no Linux GUI, so clicking the desktop item lands here:
+# a few prompts with sane presets, then the real command is echoed and run so
+# it can be copy-pasted straight into a shell next time.
+#
+# Takes the input file as $1 when invoked as an "Open with" handler; otherwise
+# asks for it. `read -e` gives readline path completion on the prompt.
+
+set -u
+
+video2x=@video2x@
+
+bold=$'\e[1m'; dim=$'\e[2m'; green=$'\e[38;2;57;255;20m'; reset=$'\e[0m'
+
+pause_exit() {
+  printf '\n%sPress Enter to close.%s' "$dim" "$reset"
+  read -r _
+  exit "$1"
+}
+
+printf '%s%sVideo2X%s %s— ML video upscaling and frame interpolation%s\n\n' \
+  "$bold" "$green" "$reset" "$dim" "$reset"
+
+input=${1-}
+while [ -z "$input" ] || [ ! -f "$input" ]; do
+  [ -n "$input" ] && printf 'No such file: %s\n' "$input"
+  read -e -r -p "Input file: " input || pause_exit 1
+  # Strip the quoting a terminal drag-and-drop adds around the path.
+  input=${input#\'}; input=${input%\'}
+  input=${input/#\~/$HOME}
+done
+
+cat <<EOF
+What should it do?
+
+  ${bold}1${reset}  Upscale 2x        ${dim}RealESRGAN, animevideov3 — fast, tuned for anime${reset}
+  ${bold}2${reset}  Upscale 4x        ${dim}RealESRGAN, animevideov3${reset}
+  ${bold}3${reset}  Upscale to 4K     ${dim}libplacebo + Anime4K — much faster, lower quality${reset}
+  ${bold}4${reset}  Upscale 4x        ${dim}RealESRGAN realesrgan-plus — for live action, slow${reset}
+  ${bold}5${reset}  2x frame rate     ${dim}RIFE v4.6 interpolation, no resolution change${reset}
+  ${bold}6${reset}  Custom            ${dim}type your own video2x flags${reset}
+
+EOF
+read -r -p "Choice [1]: " choice || pause_exit 1
+choice=${choice:-1}
+
+suffix=upscaled
+case $choice in
+  1) args=(-p realesrgan --realesrgan-model realesr-animevideov3 -s 2); suffix=2x ;;
+  2) args=(-p realesrgan --realesrgan-model realesr-animevideov3 -s 4); suffix=4x ;;
+  3) args=(-p libplacebo --libplacebo-shader anime4k-v4-a+a -w 3840 -h 2160); suffix=4k ;;
+  # realesrgan-plus ships an x4 model only — the bundled x2/x3 weights exist
+  # for realesr-animevideov3 alone, and asking for -s 2 here dies at filter
+  # init with "model param file not found".
+  4) args=(-p realesrgan --realesrgan-model realesrgan-plus -s 4); suffix=4x ;;
+  5) args=(-p rife --rife-model rife-v4.6 -m 2); suffix=2xfps ;;
+  6)
+    read -e -r -p "Flags (input/output are added for you): " -a args || pause_exit 1
+    ;;
+  *) printf 'Not a choice: %s\n' "$choice"; pause_exit 1 ;;
+esac
+
+default_out="${input%.*}.${suffix}.${input##*.}"
+read -e -r -p "Output file [${default_out}]: " output || pause_exit 1
+output=${output:-$default_out}
+output=${output/#\~/$HOME}
+
+if [ -e "$output" ]; then
+  read -r -p "$output exists. Overwrite? [y/N] " yn || pause_exit 1
+  case $yn in [yY]*) ;; *) pause_exit 1 ;; esac
+fi
+
+printf '\n%s$ video2x -i %q -o %q %s%s\n\n' \
+  "$dim" "$input" "$output" "${args[*]}" "$reset"
+
+"$video2x" -i "$input" -o "$output" "${args[@]}"
+status=$?
+
+if [ $status -eq 0 ]; then
+  printf '\n%sDone:%s %s\n' "$green" "$reset" "$output"
+else
+  printf '\nvideo2x exited with status %d.\n' "$status"
+fi
+pause_exit $status

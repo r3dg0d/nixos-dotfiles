@@ -32,6 +32,7 @@
     imv
     yt-dlp
     ffmpeg
+    video2x # ML upscaler/frame interpolator — AppImage vendored, launcher entry opens a ghostty prompt
     jellyfin-media-player # Jellyfin desktop client (native player, for this PC)
     prismlauncher
     pcsx2 # PlayStation 2 emulator
