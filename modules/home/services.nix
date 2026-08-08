@@ -1,28 +1,12 @@
 # User services owned by Home Manager.
 #
-# mpd, the SIVA LLM backend, and the one bit of cross-application arbitration
-# that only makes sense for this user.
+# The SIVA stack's own units are NOT here — they are declared by the NixOS
+# modules under modules/nixos/siva, so that a machine gets a working assistant
+# from `nixos-rebuild switch` alone. What is left is mpd and the one bit of
+# cross-application arbitration that only makes sense for this user.
 { config, pkgs, ... }:
 
 {
-  # SIVA's llama.cpp backend as a user service so a CUDA-OOM crash self-heals
-  # (Restart=on-failure) instead of leaving the assistant throwing
-  # ConnectionRefused until the next reboot. It only needs the GPU + localhost,
-  # no Wayland, so it can start with the user session.
-  systemd.user.services.siva-llm = {
-    Unit = {
-      Description = "SIVA LLM backend (llama.cpp, gemma-4-31B + vision)";
-      After = [ "graphical-session.target" ];
-    };
-    Service = {
-      ExecStart = "${config.home.homeDirectory}/.local/bin/siva-llm";
-      Restart = "on-failure";
-      RestartSec = 5;
-      StartLimitIntervalSec = 0;
-    };
-    Install.WantedBy = [ "default.target" ];
-  };
-
   # mpd — indexes ~/Music recursively; rmpc connects to it on localhost:6600
   services.mpd = {
     enable = true;
@@ -54,12 +38,13 @@
   '';
 
   # DaVinci Resolve and the SIVA LLM both want the GPU's VRAM, and Resolve
-  # OOMs when llama.cpp is holding the model. This watcher stops siva-llm
-  # while a `resolve` process is alive and restarts it once Resolve quits —
-  # but only if *it* stopped the service (so a manual stop stays stopped).
+  # OOMs when llama.cpp is holding the model. This watcher stops the llama
+  # server while a `resolve` process is alive and restarts it once Resolve
+  # quits — but only if *it* stopped the service (so a manual stop stays
+  # stopped).
   systemd.user.services.davinci-llm-pause = {
     Unit = {
-      Description = "Pause SIVA LLM (free VRAM) while DaVinci Resolve runs";
+      Description = "Pause the SIVA LLM (free VRAM) while DaVinci Resolve runs";
       After = [ "graphical-session.target" ];
       PartOf = [ "graphical-session.target" ];
     };
@@ -68,7 +53,7 @@
         set -u
         pgrep="${pkgs.procps}/bin/pgrep"
         systemctl="${pkgs.systemd}/bin/systemctl"
-        unit=siva-llm.service
+        unit=siva-llama-server.service
         paused_by_us=0
         while true; do
           if "$pgrep" -x resolve >/dev/null 2>&1; then

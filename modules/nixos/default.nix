@@ -19,5 +19,6 @@
     ./services.nix
     ./virtualisation.nix
     ./development.nix
+    ./siva
   ];
 }

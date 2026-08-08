@@ -3,18 +3,6 @@
 { pkgs, ... }:
 
 {
-  # SIVA voice assistant: uinput-level pointer control on Wayland
-  programs.ydotool.enable = true;
-
-  # SIVA durable memory (MemPalace): its onnxruntime/chromadb wheels are
-  # generic dynamically-linked binaries, so nix-ld lets them run on NixOS.
-  # Enables `uv tool install mempalace` (mempalace-mcp) to work.
-  programs.nix-ld.enable = true;
-  programs.nix-ld.libraries = with pkgs; [
-    stdenv.cc.cc # libstdc++/libgcc for onnxruntime
-    zlib
-  ];
-
   environment.systemPackages = with pkgs; [
     vim # Do not forget to add an editor to edit configuration.nix! The Nano editor is also installed by default.
     wget
@@ -37,17 +25,6 @@
 
     # ---- local inference ----
     ollama-cuda
-    (llama-cpp.override { cudaSupport = true; })
-
-    # ---- SIVA voice assistant ----
-    whisper-cpp # SIVA STT
-    piper-tts # SIVA voice output
-    wtype # SIVA virtual keyboard
-    sox # SIVA wake-word enrollment (beep synth + 16k resample)
-    socat # SIVA F7/F8/F9 toggle scripts talk to the daemon sockets
-    tesseract # SIVA agentic OCR click-by-text (find on-screen text to click)
-    # python3 carries the SIVA wake-word deps
-    (python3.withPackages (ps: with ps; [ numpy scipy scikit-learn onnxruntime tqdm requests ]))
 
     # ---- cybersecurity ----
     sqlmap # SQLi tool
