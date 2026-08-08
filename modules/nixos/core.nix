@@ -10,6 +10,11 @@
   # Use latest kernel.
   boot.kernelPackages = pkgs.linuxPackages_latest;
 
+  # NTFS on removable drives: pulls in ntfs3g (mkfs.ntfs, ntfsfix) and lets
+  # udisks auto-mount NTFS volumes on plug-in. The external Samsung T5 backup
+  # SSD is NTFS so it stays readable from Windows.
+  boot.supportedFilesystems = [ "ntfs" ];
+
   # Define a user account. Don't forget to set a password with 'passwd'.
   users.users.${config.my.username} = {
     isNormalUser = true;
