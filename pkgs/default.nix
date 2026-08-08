@@ -27,24 +27,6 @@ final: prev: {
 
   # ---- nixpkgs overrides ------------------------------------------------
 
-  # ratty 0.3.0 built arboard without its Wayland backend, so copy/paste
-  # silently failed under niri (no X11 DISPLAY to fall back to). Fixed
-  # upstream in v0.4.0; pin v0.5.0 until nixpkgs catches up.
-  ratty = prev.ratty.overrideAttrs (old: rec {
-    version = "0.5.0";
-    src = final.fetchFromGitHub {
-      owner = "orhun";
-      repo = "ratty";
-      tag = "v${version}";
-      hash = "sha256-gQ9qeR9IyPUCy4V2ynnnXeN15Fs7aNDEwjQ+33gonRU=";
-    };
-    cargoDeps = final.rustPlatform.fetchCargoVendor {
-      inherit src;
-      name = "ratty-${version}-vendor";
-      hash = "sha256-mSb7QCYQ4EL76S7wmSdHBkjE5wzbVK8ln6oPdAv5BuA=";
-    };
-  });
-
   # Lokinet: nixpkgs marks the package broken because its pinned release
   # doesn't compile against nixpkgs' newer system spdlog/fmt. Upstream's
   # intended from-source build uses the bundled oxen-logging submodules

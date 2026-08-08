@@ -3,12 +3,10 @@
 { pkgs, ... }:
 
 {
-  # Terminals. ghostty is the primary GPU-accelerated one; ratty is the TUI-ish
-  # daily driver ($TERMINAL, see modules/home); alacritty is the fallback that
-  # Mod+Shift+Return opens when a Ghostty/ratty change breaks something.
+  # Terminals. ghostty is $TERMINAL and the daily driver; alacritty is the
+  # fallback that Mod+Shift+Return opens when a Ghostty change breaks something.
   environment.systemPackages = with pkgs; [
     ghostty
-    ratty
     alacritty
     nautilus
     file-roller
@@ -19,12 +17,9 @@
     etesync-dav # Degoogled calendar
     immich # Photos
     libretranslate # Google Translate replacement
-    onlyoffice-desktopeditors # Google Docs replacement
     obsidian
     vscodium # Coding IDE
-    antigravity # Google vibe-coding IDE
     gnome-text-editor
-    vesktop # Discord client (Vencord baked in)
     simplex-chat-desktop
     coyim
     irssi
@@ -45,7 +40,7 @@
     kyber-linuxport-unofficial
     davinci-resolve-studio-unofficial # video editor 21.0.3 — vendored from creatorkostas/davinci-resolve-nixos, version-bumped
     areofyl-fetch # animated 3D `fetch` tool (github:areofyl/fetch, via flake overlay)
-    tuiweb # TUI-only web browser: HTML/CSS/JS, images and video as characters (via flake overlay)
+    browsh # text-mode web browser (drives a headless Firefox, renders to the TTY)
     mullvad-vpn
     rmpc # Music player TUI
     mpd # Music Player Daemon

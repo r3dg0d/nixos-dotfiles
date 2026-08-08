@@ -92,7 +92,7 @@
   };
 
   home.sessionVariables = {
-    TERMINAL = "ratty";
+    TERMINAL = "ghostty";
   };
 
   # user-installed scripts

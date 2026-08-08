@@ -151,7 +151,7 @@
     "format": "{icon} {volume}%",
     "format-muted": " muted",
     "format-icons": { "default": ["", "", ""] },
-    "on-click": "ratty -T 'Audio Switcher' -e node $HOME/nixos-dotfiles/config/scripts/audio-switcher/cli.js",
+    "on-click": "ghostty --title='Audio Switcher' -e node $HOME/nixos-dotfiles/config/scripts/audio-switcher/cli.js",
     "on-click-right": "pavucontrol"
   },
 

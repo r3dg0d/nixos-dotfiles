@@ -107,7 +107,7 @@ binds {
     Mod+Shift+E { quit; }
 
     // Applications
-    Mod+Return       { spawn "ratty"; }
+    Mod+Return       { spawn "ghostty"; }
     Mod+Shift+Return { spawn "alacritty"; }
     Mod+Space        { spawn "rofi" "-show" "drun"; }
     Mod+D            { spawn "rofi" "-show" "drun"; }

@@ -35,7 +35,7 @@ in
   xdg.configFile = lib.mkMerge [
     # ---- live-editable configs --------------------------------------------
     (lib.genAttrs
-      [ "nvim" "niri" "ratty" "waybar" "rofi" "mako" "quickshell" "mpv" "rmpc" "fastfetch" ]
+      [ "nvim" "niri" "waybar" "rofi" "mako" "quickshell" "mpv" "rmpc" "fastfetch" ]
       (name: {
         source = liveLink "${dotfiles}/${name}/";
         recursive = true;
