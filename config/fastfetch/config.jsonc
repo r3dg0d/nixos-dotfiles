@@ -28,16 +28,6 @@
     "memory",
     "disk",
     { "type": "weather", "key": "Weather", "timeout": 3000 },
-    {
-      "type": "command",
-      "key": "Lat / Long",
-      "text": "curl -s --max-time 3 ipinfo.io/loc || echo offline"
-    },
-    {
-      "type": "command",
-      "key": "Map",
-      "text": "loc=$(curl -s --max-time 3 ipinfo.io/loc); [ -n \"$loc\" ] && echo \"https://www.google.com/maps?q=$loc\" || echo offline"
-    },
     "break",
     "colors"
   ]

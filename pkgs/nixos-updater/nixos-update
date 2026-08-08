@@ -17,10 +17,51 @@ else
   G=""; W=""; D=""; R=""; Y=""; N=""
 fi
 
-step()  { printf '\n%s▸ %s%s\n' "$G" "$1" "$N"; }
+# ---- progress ------------------------------------------------------------
+# Every step also lands in a small JSON file that anything can watch. That is
+# what lets the quickshell panel draw a live progress bar for a run it did not
+# start — the terminal keeps the sudo prompt (a GUI panel has nowhere to type a
+# password), while the panel just follows along.
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nixos-updater"
+PROGRESS_FILE="$CACHE_DIR/progress.json"
+WAYBAR_SIGNAL="${NIXOS_UPDATER_WAYBAR_SIGNAL:-13}"
+
+progress_step=0
+progress_total=1
+progress_label="starting"
+
+# Escape the two characters that can appear in a label and break JSON.
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+write_progress() { # <running> <ok|null>
+  mkdir -p "$CACHE_DIR" 2>/dev/null || return 0
+  # The pid is what makes "running" falsifiable. on_exit clears the flag on
+  # every ordinary exit and on Ctrl-C, but a SIGKILL leaves the file behind
+  # saying a run is still going — so readers check the process is alive rather
+  # than trusting the flag, and a long step (a kernel compile is one step, for
+  # an hour) never gets mistaken for a stalled one either.
+  printf '{"running":%s,"pid":%d,"step":%d,"total":%d,"label":"%s","ok":%s,"updated":%d}\n' \
+    "$1" "$$" "$progress_step" "$progress_total" "$(json_escape "$progress_label")" \
+    "$2" "$(date +%s)" > "$PROGRESS_FILE.tmp" 2>/dev/null || return 0
+  mv -f "$PROGRESS_FILE.tmp" "$PROGRESS_FILE" 2>/dev/null || return 0
+  pkill -"RTMIN+$WAYBAR_SIGNAL" -x waybar 2>/dev/null || true
+}
+
+finish_progress() { # <ok>
+  progress_step=$progress_total
+  progress_label="done"
+  write_progress false "$1"
+}
+
+step() {
+  progress_label="$1"
+  (( progress_step < progress_total )) && (( progress_step++ ))
+  write_progress true null
+  printf '\n%s▸ %s%s\n' "$G" "$1" "$N"
+}
 info()  { printf '  %s%s%s\n' "$D" "$1" "$N"; }
 warn()  { printf '  %s! %s%s\n' "$Y" "$1" "$N"; }
-fail()  { printf '\n%s✗ %s%s\n' "$R" "$1" "$N" >&2; exit 1; }
+fail()  { printf '\n%s✗ %s%s\n' "$R" "$1" "$N" >&2; finish_progress false; exit 1; }
 ok()    { printf '  %s✓ %s%s\n' "$G" "$1" "$N"; }
 
 usage() {
@@ -96,6 +137,31 @@ confirm() {
   read -r reply
   [[ -z $reply || $reply =~ ^[Yy] ]]
 }
+
+# How many step()s this invocation will make, so the bar has a denominator.
+# Two of them (activation, the commit) are conditional on a prompt or on
+# something having actually changed, so this is the optimistic count and
+# step() clamps rather than overshooting.
+progress_total=$(( do_kernel + do_flake + do_profile + do_flatpak + do_firmware + 1 ))
+(( do_rebuild )) && progress_total=$(( progress_total + 3 ))  # build, diff, activate
+(( do_gc ))      && (( progress_total++ ))
+(( do_optimise )) && (( progress_total++ ))
+(( do_commit ))  && (( progress_total++ ))
+write_progress true null
+
+# Any exit that is not fail()'s — Ctrl-C above all — must still clear the
+# running flag, or the panel shows a bar that never finishes. One handler for
+# the whole script: a second `trap ... EXIT` anywhere below would silently
+# replace this one, taking the progress reset with it.
+outdir=""
+on_exit() {
+  local code=$?
+  [[ -n $outdir ]] && rm -rf "$outdir"
+  if [[ -f $PROGRESS_FILE ]] && grep -q '"running":true' "$PROGRESS_FILE" 2>/dev/null; then
+    if (( code == 0 )); then finish_progress true; else finish_progress false; fi
+  fi
+}
+trap on_exit EXIT
 
 [[ -f "$FLAKE/flake.nix" ]] || fail "no flake at $FLAKE (set NIXOS_UPDATER_FLAKE)"
 cd "$FLAKE" || fail "cannot enter $FLAKE"
@@ -180,9 +246,7 @@ fi
 # ---- 6. rebuild -----------------------------------------------------------
 if (( do_rebuild )); then
   step "Building $HOST"
-  outdir="$(mktemp -d -t nixos-update-XXXXXX)"
-  # shellcheck disable=SC2064  # expand $outdir now, not at trap time
-  trap "rm -rf '$outdir'" EXIT
+  outdir="$(mktemp -d -t nixos-update-XXXXXX)"   # cleaned up by on_exit
 
   if (( do_kernel )); then
     info "the mainline kernel is not in any binary cache — expect a long compile"
@@ -255,4 +319,5 @@ step "Re-checking"
 check_args=(); (( no_rc )) && check_args+=(--no-rc)
 nixos-update-check "${check_args[@]}" || true
 
+finish_progress true
 printf '\n%s╰─ done%s\n' "$G" "$N"

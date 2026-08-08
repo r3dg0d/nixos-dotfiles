@@ -21,6 +21,7 @@ SCHEMA = 1
 FLAKE_DIR = Path(os.environ.get("NIXOS_UPDATER_FLAKE", Path.home() / "nixos-dotfiles"))
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "nixos-updater"
 STATUS_FILE = CACHE_DIR / "status.json"
+PROGRESS_FILE = CACHE_DIR / "progress.json"
 PROBE_DIR = CACHE_DIR / "flake-probe"
 
 KERNEL_REPO = os.environ.get("NIXOS_UPDATER_KERNEL_REPO", "https://github.com/torvalds/linux")
@@ -134,6 +135,29 @@ def read_status() -> dict | None:
         return json.loads(STATUS_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def read_progress() -> dict | None:
+    """Where a `nixos-update` run has got to, if one is in flight.
+
+    Written by the updater itself (see its write_progress), so this reports a
+    run started from anywhere — a terminal, the quickshell panel, a script.
+
+    A run that was SIGKILLed never got to clear its own flag, so `running` is
+    only believed while the pid that wrote it is still alive. Checking the
+    process beats any staleness timeout: a single step can legitimately take an
+    hour when it is compiling a kernel.
+    """
+    try:
+        progress = json.loads(PROGRESS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if progress.get("running"):
+        pid = progress.get("pid")
+        if not pid or not Path(f"/proc/{pid}").exists():
+            progress["running"] = False
+    return progress
 
 
 def write_status(status: dict) -> None:

@@ -121,6 +121,12 @@ window#waybar {
   box-shadow: 0 0 8px #ffaa00;
 }
 #custom-nixupdate.checking { color: #7cffa0; }
+/* an update actually running — pulse so it reads as live, not just pending */
+#custom-nixupdate.running {
+  color: #000000;
+  background: #00ff41;
+  box-shadow: 0 0 8px #00ff41;
+}
 #custom-nixupdate.error,
 #custom-nixupdate.unknown {
   color: #ff2b2b;

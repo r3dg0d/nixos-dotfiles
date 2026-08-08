@@ -13,7 +13,14 @@ import html
 import json
 import sys
 
-from nixos_updater import ICONS, LABELS, SECTIONS, age_string, read_status
+from nixos_updater import (
+    ICONS,
+    LABELS,
+    SECTIONS,
+    age_string,
+    read_progress,
+    read_status,
+)
 
 NIX = "\uf313"  # nf-linux-nixos, the snowflake
 REBOOT = "\uf021"  # nf-fa-refresh
@@ -76,6 +83,21 @@ def tooltip_for(status) -> str:
 
 
 def main() -> int:
+    # An update in flight outranks everything else the bar could say: the
+    # counts are about to be wrong anyway, and what matters is how far along
+    # it is. nixos-update signals waybar on every step, so this stays live.
+    progress = read_progress()
+    if progress and progress.get("running"):
+        step, total = progress.get("step", 0), progress.get("total", 1) or 1
+        emit(
+            f"{NIX} {step}/{total}",
+            f"<b>Updating…</b>\n{html.escape(str(progress.get('label', '')))}"
+            "\n\n<i>click to open the panel</i>",
+            "running",
+            alt="running",
+        )
+        return 0
+
     status = read_status()
     if status is None:
         emit(f"{NIX} ?", "No update check has run yet.\n<i>right click to check now</i>",

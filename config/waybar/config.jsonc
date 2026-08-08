@@ -172,7 +172,7 @@
     "interval": 300,
     "signal": 13,
     "tooltip": true,
-    "on-click": "ghostty --title='NixOS Update' -e sh -c 'nixos-update; printf \"\\n[enter to close] \"; read _'",
+    "on-click": "qs ipc call updater toggle",
     "on-click-right": "ghostty --title='NixOS Update Check' -e sh -c 'nixos-update-check; printf \"\\n[enter to close] \"; read _'",
     "on-click-middle": "nixos-update-check --quiet"
   },

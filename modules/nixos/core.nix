@@ -5,6 +5,15 @@
 {
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
+  # "Git tree is dirty" on every single command is noise here, not a warning.
+  # config/ is symlinked out of the store on purpose (see modules/home/desktop.nix)
+  # so that editing a dotfile takes effect without a rebuild — which means the
+  # tree is *expected* to be dirty most of the time, and a warning that fires
+  # constantly is one nobody reads. `nixos-update` still prints the untracked
+  # files it finds, which is the case that actually bites: a new file the
+  # rebuild cannot see.
+  nix.settings.warn-dirty = false;
+
   nixpkgs.config.allowUnfree = true;
 
   # The kernel choice lives in ./kernel.nix — it is a switch now (nixpkgs'
