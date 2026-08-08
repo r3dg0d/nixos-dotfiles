@@ -15,12 +15,8 @@
     wireplumber.enable = true;
   };
 
-  # let the pipewire daemon find the LSP LV2 plugins used by the host's
-  # filter-chain definitions
-  services.pipewire.extraLv2Packages = [ pkgs.lsp-plugins ];
-
   environment.systemPackages = with pkgs; [
-    easyeffects # PipeWire effects GUI
-    lsp-plugins # LV2 plugins (expander for the deep eboy voice chain)
+    easyeffects # PipeWire effects GUI — where the mic chain lives
+    lsp-plugins # LV2 plugins EasyEffects hosts (expander, EQ, gain)
   ];
 }
