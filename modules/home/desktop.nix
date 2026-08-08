@@ -17,6 +17,71 @@ let
   wallpaper = ../../assets/wallpapers/wallpaper.jpg;
   wallpaperTarget = "Pictures/Wallpaper/wallpaper.jpg";
   wallpaperPath = "${config.home.homeDirectory}/${wallpaperTarget}";
+
+  # ---- default-application mime tables -------------------------------------
+  # Each list is the MimeType= line of the app's own .desktop, split by kind:
+  # declaring an association is not the same as being the *default* for it, so
+  # every type is named explicitly here. `assign` turns a list into the
+  # { "<mime>" = [ "<desktop>" ]; } shape xdg.mimeApps wants.
+  assign = desktop: mimes: lib.genAttrs mimes (_: [ desktop ]);
+
+  audioMimes = [
+    "application/ogg" "application/x-cue" "application/x-ogg"
+    "application/x-ogm-audio" "audio/3gpp" "audio/3gpp2" "audio/aac"
+    "audio/ac3" "audio/aiff" "audio/AMR" "audio/amr-wb" "audio/dv"
+    "audio/eac3" "audio/flac" "audio/m3u" "audio/m4a" "audio/mp1" "audio/mp2"
+    "audio/mp3" "audio/mp4" "audio/mpeg" "audio/mpeg2" "audio/mpeg3"
+    "audio/mpegurl" "audio/mpg" "audio/musepack" "audio/ogg" "audio/opus"
+    "audio/rn-mpeg" "audio/scpls" "audio/vnd.dolby.heaac.1"
+    "audio/vnd.dolby.heaac.2" "audio/vnd.dts" "audio/vnd.dts.hd"
+    "audio/vnd.rn-realaudio" "audio/vnd.wave" "audio/vorbis" "audio/wav"
+    "audio/webm" "audio/x-aac" "audio/x-adpcm" "audio/x-aiff" "audio/x-ape"
+    "audio/x-m4a" "audio/x-matroska" "audio/x-mp1" "audio/x-mp2"
+    "audio/x-mp3" "audio/x-mpegurl" "audio/x-mpg" "audio/x-ms-asf"
+    "audio/x-ms-wma" "audio/x-musepack" "audio/x-pls" "audio/x-pn-au"
+    "audio/x-pn-realaudio" "audio/x-pn-wav" "audio/x-pn-windows-pcm"
+    "audio/x-realaudio" "audio/x-scpls" "audio/x-shorten" "audio/x-tta"
+    "audio/x-vorbis" "audio/x-vorbis+ogg" "audio/x-wav" "audio/x-wavpack"
+  ];
+
+  videoMimes = [
+    "application/mxf" "application/sdp" "application/smil"
+    "application/streamingmedia" "application/vnd.apple.mpegurl"
+    "application/vnd.ms-asf" "application/vnd.rn-realmedia"
+    "application/vnd.rn-realmedia-vbr" "application/x-extension-mp4"
+    "application/x-matroska" "application/x-mpegurl" "application/x-ogm"
+    "application/x-ogm-video" "application/x-smil"
+    "application/x-streamingmedia" "video/3gp" "video/3gpp" "video/3gpp2"
+    "video/avi" "video/divx" "video/dv" "video/fli" "video/flv" "video/mkv"
+    "video/mp2t" "video/mp4" "video/mp4v-es" "video/mpeg" "video/msvideo"
+    "video/ogg" "video/quicktime" "video/vnd.avi" "video/vnd.divx"
+    "video/vnd.mpegurl" "video/vnd.rn-realvideo" "video/webm" "video/x-avi"
+    "video/x-flc" "video/x-flic" "video/x-flv" "video/x-m4v"
+    "video/x-matroska" "video/x-mpeg2" "video/x-mpeg3" "video/x-ms-afs"
+    "video/x-ms-asf" "video/x-msvideo" "video/x-ms-wmv" "video/x-ms-wmx"
+    "video/x-ms-wvxvideo" "video/x-ogm" "video/x-ogm+ogg" "video/x-theora"
+    "video/x-theora+ogg"
+  ];
+
+  imageMimes = [
+    "image/avif" "image/bmp" "image/gif" "image/heif" "image/jpeg"
+    "image/jpg" "image/jxl" "image/pjpeg" "image/png" "image/qoi"
+    "image/tiff" "image/tiff-fx" "image/webp" "image/x-bmp"
+    "image/x-farbfeld" "image/x-png"
+  ];
+
+  # COSMIC Edit's .desktop only declares text/plain; the rest are the
+  # everyday source/config types that should still open in it rather than
+  # falling through to whatever else claims them.
+  textMimes = [
+    "text/plain" "text/markdown" "text/csv" "text/x-log" "text/x-readme"
+    "text/x-python" "text/x-shellscript" "text/x-c" "text/x-c++"
+    "text/x-java" "text/x-lua" "text/x-nix" "text/x-rust" "text/x-go"
+    "text/css" "text/javascript" "text/xml"
+    "application/json" "application/x-shellscript" "application/toml"
+    "application/x-yaml" "application/yaml" "application/xml"
+    "application/x-zerosize"
+  ];
 in
 {
   # ---- wallpaper -----------------------------------------------------------
@@ -116,17 +181,48 @@ in
     size = 24;
   };
 
+  # ---- GTK theme -----------------------------------------------------------
+  # adw-gtk3-dark: libadwaita's dark palette backported to GTK3, so GTK3 and
+  # GTK4 apps look like one set instead of two. Papirus-Dark for icons.
+  gtk = {
+    enable = true;
+    theme = {
+      name = "adw-gtk3-dark";
+      package = pkgs.adw-gtk3;
+    };
+    iconTheme = {
+      name = "Papirus-Dark";
+      package = pkgs.papirus-icon-theme;
+    };
+    gtk3.extraConfig.gtk-application-prefer-dark-theme = 1;
+    gtk4.extraConfig.gtk-application-prefer-dark-theme = 1;
+  };
+
+  # GTK4/libadwaita apps — Nautilus above all — hardcode their own stylesheet
+  # and ignore gtk.theme entirely. What they *do* follow is this colour-scheme
+  # preference, so without it Nautilus stays stubbornly light. The gtk-theme
+  # key is the same value again for anything reading it out of dconf.
+  dconf.settings."org/gnome/desktop/interface" = {
+    color-scheme = "prefer-dark";
+    gtk-theme = "adw-gtk3-dark";
+  };
+
   # ---- default applications ------------------------------------------------
   xdg.mimeApps = {
     enable = true;
-    defaultApplications = {
-      "text/html" = [ "chromium-browser.desktop" ];
-      "application/xhtml+xml" = [ "chromium-browser.desktop" ];
-      "x-scheme-handler/http" = [ "chromium-browser.desktop" ];
-      "x-scheme-handler/https" = [ "chromium-browser.desktop" ];
-      "x-scheme-handler/about" = [ "chromium-browser.desktop" ];
-      "x-scheme-handler/unknown" = [ "chromium-browser.desktop" ];
-    };
+    defaultApplications = lib.mkMerge [
+      {
+        "text/html" = [ "chromium-browser.desktop" ];
+        "application/xhtml+xml" = [ "chromium-browser.desktop" ];
+        "x-scheme-handler/http" = [ "chromium-browser.desktop" ];
+        "x-scheme-handler/https" = [ "chromium-browser.desktop" ];
+        "x-scheme-handler/about" = [ "chromium-browser.desktop" ];
+        "x-scheme-handler/unknown" = [ "chromium-browser.desktop" ];
+      }
+      (assign "mpv.desktop" (audioMimes ++ videoMimes))
+      (assign "imv.desktop" imageMimes)
+      (assign "com.system76.CosmicEdit.desktop" textMimes)
+    ];
   };
 
   # Hide these apps from the rofi drun launcher without uninstalling them.
