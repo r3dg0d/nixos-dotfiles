@@ -577,7 +577,7 @@ else
 fi
 
 # ---- desktop bits ----
-for pair in "Waybar:waybar" "Ghostty:ghostty" "Nautilus:nautilus" "ungoogled-chromium:chromium"; do
+for pair in "Waybar:waybar" "Ghostty:ghostty" "Nautilus:nautilus" "Helium:helium" "nixos-update:nixos-update"; do
     label=${pair%%:*}; bin=${pair##*:}
     if [[ -x $SW/bin/$bin ]]; then
         report "$label" OK

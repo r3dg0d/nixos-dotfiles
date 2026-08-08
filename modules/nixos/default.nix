@@ -7,6 +7,8 @@
   imports = [
     ./options.nix
     ./core.nix
+    ./kernel.nix
+    ./updater.nix
     ./networking.nix
     ./audio.nix
     ./hardware/nvidia.nix

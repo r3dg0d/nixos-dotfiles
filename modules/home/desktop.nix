@@ -212,12 +212,15 @@ in
     enable = true;
     defaultApplications = lib.mkMerge [
       {
-        "text/html" = [ "chromium-browser.desktop" ];
-        "application/xhtml+xml" = [ "chromium-browser.desktop" ];
-        "x-scheme-handler/http" = [ "chromium-browser.desktop" ];
-        "x-scheme-handler/https" = [ "chromium-browser.desktop" ];
-        "x-scheme-handler/about" = [ "chromium-browser.desktop" ];
-        "x-scheme-handler/unknown" = [ "chromium-browser.desktop" ];
+        # Helium is the default browser (pkgs/helium.nix). Its .desktop is
+        # named helium.desktop and ships the same MimeType= line Chromium
+        # does, so these are the types it actually claims.
+        "text/html" = [ "helium.desktop" ];
+        "application/xhtml+xml" = [ "helium.desktop" ];
+        "x-scheme-handler/http" = [ "helium.desktop" ];
+        "x-scheme-handler/https" = [ "helium.desktop" ];
+        "x-scheme-handler/about" = [ "helium.desktop" ];
+        "x-scheme-handler/unknown" = [ "helium.desktop" ];
       }
       (assign "mpv.desktop" (audioMimes ++ videoMimes))
       (assign "imv.desktop" imageMimes)

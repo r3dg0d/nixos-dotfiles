@@ -7,8 +7,8 @@
 
   nixpkgs.config.allowUnfree = true;
 
-  # Use latest kernel.
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  # The kernel choice lives in ./kernel.nix — it is a switch now (nixpkgs'
+  # latest, or Linus' mainline tree), not a one-liner.
 
   # NTFS on removable drives: pulls in ntfs3g (mkfs.ntfs, ntfsfix) and lets
   # udisks auto-mount NTFS volumes on plug-in. The external Samsung T5 backup

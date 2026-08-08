@@ -10,7 +10,7 @@
     alacritty
     nautilus
     file-roller
-    ungoogled-chromium
+    helium # default browser — Chromium fork, AppImage vendored + Ozone-Wayland wrapped
     freetube
     keepassxc
     thunderbird # Gmail replacement
@@ -46,8 +46,12 @@
 
   programs.firefox.enable = true;
 
-  # Managed policy read by ungoogled-chromium from /etc/chromium/policies:
-  # makes the local SearXNG the default (omnibox) search engine.
+  # Managed policy that makes the local SearXNG the default (omnibox) search
+  # engine. This module writes /etc/chromium/policies — which is still the
+  # right path after the switch from ungoogled-chromium to Helium: Helium
+  # inherits ungoogled-chromium's policy directory rather than branding its
+  # own (`strings` on its binary turns up /etc/chromium/policies and nothing
+  # else), so the policy carries over untouched.
   programs.chromium = {
     enable = true;
     defaultSearchProviderEnabled = true;

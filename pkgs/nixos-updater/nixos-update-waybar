@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Render the cached update status as one line of waybar JSON.
+
+Deliberately does no work of its own: it reads
+$XDG_CACHE_HOME/nixos-updater/status.json and formats it. The bar can poll this
+every few minutes for free because the expensive part — `nixos-update-check` —
+runs on its own timer and signals waybar when it has something new.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import sys
+
+from nixos_updater import ICONS, LABELS, SECTIONS, age_string, read_status
+
+NIX = "\uf313"  # nf-linux-nixos, the snowflake
+REBOOT = "\uf021"  # nf-fa-refresh
+
+
+def emit(text, tooltip, css_class, alt=""):
+    print(json.dumps({
+        "text": text,
+        "tooltip": tooltip,
+        "class": css_class,
+        "alt": alt,
+    }))
+
+
+def tooltip_for(status) -> str:
+    """Pango markup. Waybar renders custom-module tooltips as markup, so every
+    value interpolated in here has to be escaped."""
+    info = status.get("info", {})
+    lines = []
+
+    total = status.get("total", 0)
+    head = f"<b>{total} update{'s' if total != 1 else ''} available</b>" if total \
+        else "<b>System is up to date</b>"
+    lines.append(head)
+    lines.append(f"<i>checked {html.escape(age_string(status.get('checked_at')))}</i>")
+    lines.append("")
+
+    for name in SECTIONS:
+        sec = status.get("sections", {}).get(name)
+        if not sec:
+            continue
+        icon, label = ICONS[name], LABELS[name]
+        if sec.get("skipped"):
+            continue  # not installed on this machine; saying so every time is noise
+        if sec.get("error"):
+            lines.append(f"{icon}  {label}: <span color='#ff2b2b'>"
+                         f"{html.escape(str(sec['error']))}</span>")
+        elif not sec.get("count"):
+            lines.append(f"{icon}  {label}: <span color='#555555'>up to date</span>")
+        else:
+            lines.append(f"{icon}  <b>{label}</b> ({sec['count']})")
+            for item in sec["items"][:8]:
+                lines.append(f"      <span color='#00ff41'>·</span> {html.escape(str(item))}")
+            if len(sec["items"]) > 8:
+                lines.append(f"      <i>… and {len(sec['items']) - 8} more</i>")
+
+    lines.append("")
+    kernel = info.get("running_kernel", "?")
+    pin = info.get("pinned_kernel")
+    lines.append(f"running kernel: {html.escape(kernel)}"
+                 + (f"  (pin {html.escape(str(pin))})" if pin else ""))
+    if info.get("generations"):
+        lines.append(f"system generations: {info['generations']}")
+    if info.get("reboot_required"):
+        lines.append("<span color='#ffaa00'>reboot required — booted closure is stale</span>")
+
+    lines.append("")
+    lines.append("<i>left click: update   ·   right click: re-check</i>")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    status = read_status()
+    if status is None:
+        emit(f"{NIX} ?", "No update check has run yet.\n<i>right click to check now</i>",
+             "unknown")
+        return 0
+
+    if status.get("running"):
+        # A check in flight keeps whatever the last one found in the tooltip.
+        emit(f"{NIX} ···", "Checking for updates…", "checking")
+        return 0
+
+    total = status.get("total", 0)
+    errors = status.get("errors") or []
+    reboot = status.get("info", {}).get("reboot_required")
+
+    text = f"{NIX} {total}" if total else NIX
+    if reboot:
+        text += f" {REBOOT}"
+
+    if errors:
+        css = "error"
+    elif reboot:
+        css = "reboot"
+    elif total:
+        css = "updates"
+    else:
+        css = "uptodate"
+
+    emit(text, tooltip_for(status), css, alt=css)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # the bar must always get a parseable line
+        emit(f"{NIX} !", f"nixos-update-waybar: {exc}", "error")
+        sys.exit(0)

@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Move pkgs/linux-mainline/pin.json to a torvalds/linux tag.
+
+With no arguments it picks the newest tag on GitHub — an -rc counts as newest
+unless --no-rc is given. Pass a tag to pin something specific, which is also
+how you roll back when an -rc turns out not to boot.
+
+Prefetching the source is a ~250 MB download, so it only happens when the pin
+actually moves. `nixos-update --kernel` calls this; running it on its own is
+fine when you want to bump the pin without touching anything else.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+
+from nixos_updater import (
+    KERNEL_PIN,
+    KERNEL_REPO,
+    NIX_FLAGS,
+    pinned_tag,
+    read_pin,
+    remote_kernel_tags,
+)
+
+
+def prefetch(tag: str) -> str:
+    """The content hash of a tag's tarball, in the form fetchFromGitHub wants.
+
+    `nix store prefetch-file --unpack` strips the archive's root directory just
+    as fetchzip does, which is precisely why its hash is reusable here —
+    `nix-prefetch-url --unpack` keeps the root and yields a hash that fails to
+    match at build time.
+    """
+    url = f"{KERNEL_REPO}/archive/refs/tags/{tag}.tar.gz"
+    print(f"  prefetching {url} (this is a ~250 MB download)", flush=True)
+    out = subprocess.run(
+        ["nix", "store", "prefetch-file", "--json", "--unpack", "--hash-type", "sha256", url]
+        + NIX_FLAGS,
+        stdout=subprocess.PIPE,
+        text=True,
+        timeout=3600,
+        check=True,
+    ).stdout
+    return json.loads(out)["hash"]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("tag", nargs="?", help="tag to pin, e.g. v7.2-rc6 (default: newest upstream)")
+    ap.add_argument("--no-rc", action="store_true", help="only consider final releases")
+    ap.add_argument("--print", dest="show", action="store_true",
+                    help="report the pinned and newest tags, then exit")
+    args = ap.parse_args()
+
+    if not KERNEL_PIN.exists():
+        raise SystemExit(f"no pin file at {KERNEL_PIN}")
+
+    current = pinned_tag(read_pin())
+    target = args.tag or remote_kernel_tags(allow_rc=not args.no_rc)[-1]
+    if not target.startswith("v"):
+        target = "v" + target
+
+    if args.show:
+        print(f"pinned: {current}")
+        print(f"latest: {target}")
+        return 0
+
+    if target == current:
+        print(f"kernel pin already at {current}")
+        return 0
+
+    print(f"kernel pin {current} → {target}")
+    KERNEL_PIN.write_text(
+        json.dumps(
+            {
+                "version": target.lstrip("v"),
+                "rev": target,
+                "hash": prefetch(target),
+                "updated": time.strftime("%Y-%m-%d"),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    print(f"  wrote {KERNEL_PIN}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except subprocess.CalledProcessError as exc:
+        sys.exit(f"command failed: {' '.join(map(str, exc.cmd))}")
+    except RuntimeError as exc:
+        sys.exit(str(exc))

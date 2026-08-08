@@ -93,6 +93,10 @@
 
   home.sessionVariables = {
     TERMINAL = "ghostty";
+    # For the CLI tools that read $BROWSER directly instead of going through
+    # xdg-open. The xdg.mimeApps defaults in ../home/desktop.nix are what
+    # graphical apps follow.
+    BROWSER = "helium";
   };
 
   # user-installed scripts

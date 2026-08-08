@@ -110,7 +110,7 @@ backend ([`modules/nixos/desktop/portals.nix`](modules/nixos/desktop/portals.nix
 to get the preference out to Flatpaks and portal-aware apps.
 
 Default applications ([`modules/home/desktop.nix`](modules/home/desktop.nix)):
-ungoogled-chromium for web, **mpv** for audio and video, **imv** for images,
+**Helium** for web, **mpv** for audio and video, **imv** for images,
 **COSMIC Edit** for text. Every mime type is enumerated explicitly — declaring
 an association in a `.desktop` is not the same as being the default for it.
 
@@ -195,8 +195,8 @@ info. Pulled in as the `areofyl-fetch` flake input. Ghostty is `$TERMINAL` and
 
 Workspaces and focused-window title on the left, clock in the center, and a
 status cluster on the right — weather, temperatures, volume, network, CPU and
-memory, an MPD player widget, the Mirror toggle, and a power button that opens
-the quickshell power menu.
+memory, an MPD player widget, a [system-update indicator](#the-waybar-widget),
+the Mirror toggle, and a power button that opens the quickshell power menu.
 
 ## 🪟 Quickshell widgets
 
@@ -405,6 +405,10 @@ To change it, replace the file in `assets/wallpapers/` and rebuild.
 
 ## 🛠️ Custom tools
 
+- **`nixos-update`** — one command for the kernel pin, the flake inputs, the nix
+  profile, the flatpaks and the firmware, then a single rebuild with a closure
+  diff to approve. Backed by `nixos-update-check` on a timer and a waybar
+  widget. See [Updating](#-updating).
 - **[feathershot](https://github.com/r3dg0d/feathershot) MKII** — a native
   Wayland screenshot + annotation tool bound to `PrtSc`. `grim`/`slurp` capture
   → a Quickshell overlay for arrows, boxes, circles, freehand and text →
@@ -422,7 +426,7 @@ a few Flatpaks, plus flake inputs and vendored derivations.
 ### Web & communication
 | App | Source | Use |
 |-----|--------|-----|
-| [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) | nixpkg | Primary browser (defaults to local SearXNG via managed policy) |
+| [Helium](https://github.com/imputnet/helium-linux) | vendored AppImage | Primary browser (defaults to local SearXNG via managed policy) |
 | Firefox / Tor Browser | nixpkg | Secondary / anonymous browsing |
 | FreeTube | nixpkg | Privacy-friendly YouTube client |
 | browsh | nixpkg | Text-mode browsing in the terminal (drives a headless Firefox) |
@@ -483,8 +487,10 @@ Papirus-Dark for GTK.
 ├── modules/
 │   ├── nixos/                   # everything PORTABLE
 │   │   ├── options.nix          #   my.username / my.homeDirectory / my.dotfilesDir
-│   │   ├── core.nix             #   nix, kernel, the user, shells, fonts, logind,
+│   │   ├── core.nix             #   nix, the user, shells, fonts, logind,
 │   │   │                        #   NTFS support for the external backup SSD
+│   │   ├── kernel.nix           #   nixpkgs' latest, or Linus' mainline tree
+│   │   ├── updater.nix          #   nixos-update + its check timer
 │   │   ├── networking.nix       #   NetworkManager, Mullvad DNS, lokinet
 │   │   ├── audio.nix            #   PipeWire + WirePlumber
 │   │   ├── hardware/nvidia.nix
@@ -499,6 +505,9 @@ Papirus-Dark for GTK.
 │
 ├── pkgs/                        # everything this repo builds itself
 │   ├── default.nix              #   the overlay (also the nixpkgs overrides)
+│   ├── nixos-updater/           #   the update checker/updater + waybar widget
+│   ├── linux-mainline/          #   torvalds/linux, pinned in pin.json
+│   ├── helium.nix               #   the browser: AppImage + Ozone-Wayland wrapper
 │   ├── sddm-ascii-city.nix · siva/ · siva-type/ · siva-voicefetch/
 │   ├── siva-fetch-assets.nix · davinci-resolve.nix
 │   └── hydralauncher-wayland.nix · quickshell-mirror.nix · mingw32-cc.nix
@@ -564,12 +573,91 @@ which is likewise never in this repository (and its unit has a
 
 ## 🔄 Updating
 
+`nixos-update` moves every source this machine pulls from and then does **one**
+rebuild that picks all of it up at once:
+
+```sh
+nixos-update                # everything, with a diff to approve before switching
+nixos-update -y --gc        # unattended, then prune generations older than 14d
+nixos-update --dry          # build and show the diff, never activate
+nixos-update-check          # only look; change nothing
+```
+
+| step | what moves | turn off with |
+|---|---|---|
+| kernel | `pkgs/linux-mainline/pin.json` → newest `torvalds/linux` tag | `--no-kernel` |
+| flake | `flake.lock` — nixpkgs, home-manager, `fetch` | `--no-flake` |
+| profile | `nix profile upgrade --all` | `--no-profile` |
+| flatpak | `flatpak update` + prune unused runtimes | `--no-flatpak` |
+| firmware | `fwupdmgr update` — **opt-in**, it flashes hardware | *(on with `--firmware`)* |
+| rebuild | `nixos-rebuild build` → diff → `switch` | `--no-rebuild`, `--boot`, `--dry` |
+
+Nothing is activated without showing you an [`nvd`](https://khumba.net/projects/nvd)
+diff of the closure first — and the build happens *before* that prompt, so a
+build failure leaves the running system untouched.
+
+The old manual route still works, of course:
+
 ```sh
 cd ~/nixos-dotfiles
 nix flake update                          # all inputs
 nix flake update nixpkgs                  # just one
 sudo nixos-rebuild switch --flake .#nixos-btw
 ```
+
+### The waybar widget
+
+![Waybar](assets/waybar.png)
+
+`custom/nixupdate` in the right-hand cluster shows a ❄ with the number of
+pending updates — dim green when there is nothing to do, glowing green when
+there is, amber when the booted kernel is no longer the current one. Hovering
+lists what is waiting, per source.
+
+- **left click** — `nixos-update` in a ghostty window
+- **right click** — re-check now, with output
+- **middle click** — re-check quietly in the background
+
+A systemd **user** timer (`nixos-update-check.timer`, every
+`my.updater.interval`, default 6h) refreshes the answer and raises `RTMIN+13` at
+waybar, so the count drops the moment an update finishes rather than on the next
+poll. The widget itself only ever reads
+`~/.cache/nixos-updater/status.json` — it never does network work on waybar's
+interval.
+
+```nix
+my.updater.enable    = true;   # the commands + the widget's data
+my.updater.autoCheck = true;   # the timer
+my.updater.interval  = "6h";
+```
+
+### Tracking the mainline kernel
+
+Off by default; this host boots nixpkgs' newest packaged kernel. To follow
+Linus' tree instead — release candidates included:
+
+```nix
+my.kernel.mainline.enable = true;   # hosts/nixos-btw/default.nix
+my.kernel.mainline.trackRC = true;  # false = final releases only
+```
+
+The tag is **pinned** in [`pkgs/linux-mainline/pin.json`](pkgs/linux-mainline/pin.json)
+rather than resolved during evaluation, because a configuration that changed
+underneath you between two rebuilds would not be reproducible. `nixos-update`
+rewrites that file; `nixos-kernel-pin` does it on its own:
+
+```sh
+nixos-kernel-pin --print     # pinned vs newest upstream
+nixos-kernel-pin             # bump to newest (~250 MB fetch)
+nixos-kernel-pin v7.1        # pin something specific — this is the rollback
+```
+
+Know what this costs before enabling it: **no binary cache has it**, so every
+bump is a 20-60 minute kernel compile plus a rebuild of every out-of-tree
+module. NVIDIA's proprietary driver in particular often fails to build against
+a fresh `-rc`; when that happens the *build* fails, which is safe — the running
+system is untouched — and the fix is to pin back a tag. Keep more than one
+generation in the boot menu while tracking `-rc` kernels.
 
 ## 🩺 Troubleshooting
 
@@ -593,6 +681,31 @@ nix flake check                           # evaluates AND builds every host
 | No sound / no mic in SIVA | `wpctl status`; SIVA's choice is in `~/.local/share/siva/mic.json` |
 | Typing does not work | `systemctl status ydotoold` and `id` — you must be in the `ydotool` group |
 | Wallpaper missing | Home Manager has not run for that user; `systemctl status home-manager-$USER` |
+| An AppImage app paints a blank window | see below — it is the NVIDIA/Ozone trap, not a crash |
+| `nixos-update` reports a section error | run `nixos-update-check` by hand; the failing step prints its own message |
+
+### AppImage apps that paint a blank window
+
+This has now bitten two packages here — Hydra Launcher and Helium — and the
+process looks perfectly healthy while it happens, so exit codes prove nothing.
+**Screenshot the window and actually look at it.** Two causes, both from the
+same root: a bundled Chromium/Electron never passes through the nixpkgs
+wrapper, so the global `NIXOS_OZONE_WL=1` does nothing for it.
+
+1. `--ozone-platform-hint=auto` is silently ignored; the app picks X11 and goes
+   through XWayland. Only an explicit `--ozone-platform=wayland` works.
+2. On Wayland the bundled EGL cannot drive the NVIDIA card
+   (`pci id … driver (null)` → `failed to create dri2 screen`), the GPU process
+   dies at init, and the window paints solid white or black. GLVND has to be
+   pointed at the NVIDIA ICD **by filename** —
+   `__EGL_VENDOR_LIBRARY_FILENAMES=/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json`.
+   Naming the whole `egl_vendor.d` directory is not enough: Mesa's
+   `50_mesa.json` still wins and fails identically.
+
+Both fixes go in a `makeWrapper --run` guarded on `$WAYLAND_DISPLAY`, and the
+`.desktop` `Exec=` must be repointed at the wrapper or the launcher bypasses it.
+Working examples: [`pkgs/helium.nix`](pkgs/helium.nix) and
+[`pkgs/hydralauncher-wayland.nix`](pkgs/hydralauncher-wayland.nix).
 
 Useful commands:
 

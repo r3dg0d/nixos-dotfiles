@@ -101,6 +101,36 @@ window#waybar {
   background: #ffffff;
 }
 
+/* ── system updates ─────────────────────────────────────────────────────── */
+/* Dim when there is nothing to do, so the bar only draws the eye when there
+   is. Classes come from nixos-update-waybar. */
+#custom-nixupdate {
+  padding: 0 10px;
+  border-radius: 8px;
+  color: #555555;
+}
+#custom-nixupdate.uptodate { color: #0e5c2a; }
+#custom-nixupdate.updates {
+  color: #00ff41;
+  text-shadow: 0 0 6px #00ff41;
+}
+/* a pending reboot outranks a pending update — amber, not green */
+#custom-nixupdate.reboot {
+  color: #000000;
+  background: #ffaa00;
+  box-shadow: 0 0 8px #ffaa00;
+}
+#custom-nixupdate.checking { color: #7cffa0; }
+#custom-nixupdate.error,
+#custom-nixupdate.unknown {
+  color: #ff2b2b;
+  text-shadow: 0 0 6px #ff2b2b;
+}
+#custom-nixupdate:hover {
+  color: #000000;
+  background: #ffffff;
+}
+
 #custom-power {
   color: #ff2b2b;
   padding: 0 12px;

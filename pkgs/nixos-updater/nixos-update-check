@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""Ask every updatable thing on this machine whether it has anything newer.
+
+Writes a status document to $XDG_CACHE_HOME/nixos-updater/status.json and
+signals waybar, so the bar widget only ever reads a small local file instead of
+doing network work on its refresh interval.
+
+Nothing here mutates the system, the flake, or the kernel pin — this command is
+safe to run on a timer. `nixos-update` is the one that acts on what it finds.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from nixos_updater import (
+    FLAKE_DIR,
+    KERNEL_PIN,
+    LABELS,
+    NIX_FLAGS,
+    PROBE_DIR,
+    SCHEMA,
+    SECTIONS,
+    mark_running,
+    pinned_tag,
+    read_pin,
+    remote_kernel_tags,
+    run,
+    section,
+    signal_waybar,
+    write_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# checks
+
+
+def check_flake():
+    """Resolve every flake input against upstream without touching the repo.
+
+    The only honest way to know whether `nix flake update` would move an input
+    is to let nix resolve it — and the only way to do that without rewriting
+    the real flake.lock is on a copy. Locking reads flake.nix and flake.lock
+    and never evaluates outputs, so the copy is two files.
+    """
+    flake_path = FLAKE_DIR / "flake.nix"
+    lock_path = FLAKE_DIR / "flake.lock"
+    if not flake_path.exists():
+        return section(error=f"no flake.nix at {FLAKE_DIR}")
+
+    current = json.loads(lock_path.read_text()) if lock_path.exists() else {"nodes": {}}
+
+    PROBE_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(flake_path, PROBE_DIR / "flake.nix")
+    new_lock = PROBE_DIR / "flake.lock"
+    new_lock.unlink(missing_ok=True)
+    if lock_path.exists():
+        shutil.copy2(lock_path, new_lock)
+
+    # `path:` explicitly, never a bare path: given a bare path nix walks up
+    # looking for an enclosing git repository, and $HOME here is one — so the
+    # probe would be resolved as a flake inside ~/.git and fail.
+    proc = run(
+        ["nix", "flake", "update", "--flake", f"path:{PROBE_DIR}"] + NIX_FLAGS,
+        timeout=900,
+    )
+    if proc.returncode != 0 or not new_lock.exists():
+        err = (proc.stderr or proc.stdout or "").strip()
+        return section(error=(err.splitlines()[-1][:200] if err else "nix flake update failed"))
+
+    updated = json.loads(new_lock.read_text())
+
+    def ident(node):
+        """A comparable identity for a locked input, whatever its fetcher."""
+        locked = node.get("locked", {})
+        return locked.get("rev") or locked.get("narHash") or json.dumps(locked, sort_keys=True)
+
+    def short(node):
+        locked = node.get("locked", {})
+        if locked.get("rev"):
+            return locked["rev"][:7]
+        if locked.get("lastModified"):
+            return time.strftime("%Y-%m-%d", time.localtime(locked["lastModified"]))
+        return (locked.get("narHash") or "?")[7:15]
+
+    items = []
+    nodes = updated.get("nodes", {})
+    root = nodes.get(updated.get("root", "root"), {})
+    # The root node's `inputs` maps the names written in flake.nix to node keys.
+    for name, key in sorted(root.get("inputs", {}).items()):
+        if isinstance(key, list):
+            continue  # a `follows` indirection, not an input we fetch
+        new_node = nodes.get(key, {})
+        old_node = current.get("nodes", {}).get(key, {})
+        if not old_node or ident(old_node) != ident(new_node):
+            items.append(f"{name} {short(old_node) if old_node else 'new'} → {short(new_node)}")
+
+    return section(count=len(items), items=items)
+
+
+def check_kernel(allow_rc=True):
+    """Compare the pinned mainline tag against the newest tag on GitHub."""
+    if not KERNEL_PIN.exists():
+        return section(skipped=f"no kernel pin at {KERNEL_PIN}")
+
+    latest = remote_kernel_tags(allow_rc)[-1]
+    pinned = pinned_tag(read_pin())
+    if latest == pinned:
+        return section()
+    return section(count=1, items=[f"{pinned} → {latest}"])
+
+
+def check_flatpak():
+    if not shutil.which("flatpak"):
+        return section(skipped="flatpak not installed")
+    proc = run(
+        ["flatpak", "remote-ls", "--updates", "--columns=application,version"],
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr.strip().splitlines() or ["flatpak remote-ls failed"])[-1]
+        return section(error=err[:200])
+
+    items = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        app, _, version = line.partition("\t")
+        items.append(f"{app.strip()} {version.strip()}".strip())
+    return section(count=len(items), items=items)
+
+
+def check_profile():
+    """Flag `nix profile` entries whose source flake has moved on.
+
+    `nix profile upgrade` has no dry-run, so resolve each distinct source
+    ourselves and compare against the narHash baked into the entry's locked URL.
+    """
+    proc = run(["nix", "profile", "list", "--json"] + NIX_FLAGS, timeout=120)
+    if proc.returncode != 0:
+        return section(skipped="no nix profile")
+    try:
+        elements = json.loads(proc.stdout).get("elements", {})
+    except json.JSONDecodeError:
+        return section(error="could not parse `nix profile list`")
+
+    resolved: dict[str, str | None] = {}  # one resolution per distinct source
+    items = []
+    for name, el in sorted(elements.items()):
+        origin, locked = el.get("originalUrl"), el.get("url")
+        if not origin or not locked:
+            continue  # installed from a bare store path; nothing to compare to
+        if origin not in resolved:
+            meta = run(["nix", "flake", "metadata", "--json", "--refresh", origin] + NIX_FLAGS,
+                       timeout=600)
+            try:
+                resolved[origin] = json.loads(meta.stdout)["locked"].get("narHash")
+            except (json.JSONDecodeError, KeyError):
+                resolved[origin] = None
+        upstream = resolved[origin]
+        if not upstream:
+            continue
+        m = re.search(r"narHash=([^&]+)", locked)  # carried as a query parameter
+        have = (
+            m.group(1).replace("%3D", "=").replace("%2B", "+").replace("%2F", "/")
+            if m else None
+        )
+        if have and have != upstream:
+            items.append(f"{name} ({origin})")
+    return section(count=len(items), items=items)
+
+
+def check_firmware():
+    if not shutil.which("fwupdmgr"):
+        return section(skipped="fwupd not enabled")
+    proc = run(["fwupdmgr", "get-updates", "--json"], timeout=180)
+    # fwupdmgr exits non-zero for "no updates available", which is a clean
+    # result rather than a failure — so read the payload before the exit code.
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return section() if proc.returncode != 0 else section(error="unparseable fwupdmgr output")
+
+    items = []
+    for dev in payload.get("Devices", []):
+        for rel in dev.get("Releases", []):
+            items.append(f"{dev.get('Name', 'device')} → {rel.get('Version', '?')}")
+            break  # only the newest release per device is interesting
+    return section(count=len(items), items=items)
+
+
+def gather_info():
+    """Facts that are not updates but belong beside them in the tooltip."""
+    import os
+
+    info = {"running_kernel": os.uname().release}
+
+    if KERNEL_PIN.exists():
+        try:
+            info["pinned_kernel"] = read_pin().get("version")
+        except json.JSONDecodeError:
+            pass
+
+    profiles = Path("/nix/var/nix/profiles")
+    if profiles.is_dir():
+        info["generations"] = len(list(profiles.glob("system-*-link")))
+
+    # A rebuild that changed the kernel, its modules or the initrd does not
+    # take effect until reboot, and it is easy to forget you are still running
+    # the old one. /run/booted-system is the closure that actually booted.
+    booted, current = Path("/run/booted-system"), Path("/run/current-system")
+    if booted.exists() and current.exists():
+        try:
+            info["reboot_required"] = any(
+                (booted / p).resolve() != (current / p).resolve()
+                for p in ("kernel", "initrd", "kernel-modules")
+                if (booted / p).exists() or (current / p).exists()
+            )
+        except OSError:
+            pass
+    return info
+
+
+CHECKS = {
+    "flake": check_flake,
+    "kernel": check_kernel,
+    "flatpak": check_flatpak,
+    "profile": check_profile,
+    "firmware": check_firmware,
+}
+
+
+# ---------------------------------------------------------------------------
+
+
+def print_report(status):
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(status["checked_at"]))
+    print(f"NixOS update check — {when} ({status['duration']}s)")
+    info = status["info"]
+    print(f"  running kernel   {info.get('running_kernel', '?')}"
+          f"{'  (pin ' + info['pinned_kernel'] + ')' if info.get('pinned_kernel') else ''}")
+    if info.get("reboot_required"):
+        print("  reboot required  the booted kernel/initrd is not the current one")
+    print()
+    for name in SECTIONS:
+        sec = status["sections"].get(name)
+        if not sec:
+            continue
+        label = f"{LABELS[name]:<16}"
+        if sec["skipped"]:
+            print(f"  {label} skipped ({sec['skipped']})")
+        elif sec["error"]:
+            print(f"  {label} ERROR  {sec['error']}")
+        elif not sec["count"]:
+            print(f"  {label} up to date")
+        else:
+            print(f"  {label} {sec['count']} update(s)")
+            for item in sec["items"][:20]:
+                print(f"      · {item}")
+            if len(sec["items"]) > 20:
+                print(f"      … and {len(sec['items']) - 20} more")
+    print()
+    print(f"  {status['total']} update(s) available" if status["total"]
+          else "  everything is up to date")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--only", help=f"comma-separated subset of: {', '.join(SECTIONS)}")
+    ap.add_argument("--no-rc", action="store_true",
+                    help="ignore kernel -rc tags; track final releases only")
+    ap.add_argument("--json", action="store_true",
+                    help="print the status document instead of a report")
+    ap.add_argument("--quiet", "-q", action="store_true",
+                    help="print nothing; just refresh the cache")
+    ap.add_argument("--no-signal", action="store_true", help="do not signal waybar")
+    args = ap.parse_args()
+
+    wanted = SECTIONS
+    if args.only:
+        wanted = [s.strip() for s in args.only.split(",") if s.strip()]
+        unknown = [s for s in wanted if s not in CHECKS]
+        if unknown:
+            ap.error(f"unknown section(s): {', '.join(unknown)}")
+
+    if not args.no_signal:
+        mark_running(True)
+
+    started = time.time()
+    sections = {}
+    for name in wanted:
+        try:
+            sections[name] = (
+                check_kernel(allow_rc=not args.no_rc) if name == "kernel" else CHECKS[name]()
+            )
+        except subprocess.TimeoutExpired:
+            sections[name] = section(error="timed out")
+        except Exception as exc:  # one broken check must not lose the others
+            sections[name] = section(error=f"{type(exc).__name__}: {exc}"[:200])
+
+    status = {
+        "schema": SCHEMA,
+        "running": False,
+        "checked_at": int(started),
+        "duration": round(time.time() - started, 1),
+        "sections": sections,
+        "total": sum(s["count"] for s in sections.values()),
+        "errors": sorted(n for n, s in sections.items() if s["error"]),
+        "info": gather_info(),
+    }
+    write_status(status)
+    if not args.no_signal:
+        signal_waybar()
+
+    if args.json:
+        print(json.dumps(status, indent=2))
+    elif not args.quiet:
+        print_report(status)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -12,6 +12,15 @@ final: prev: {
   quickshell-mirror = final.callPackage ./quickshell-mirror.nix { };
   hydralauncher-wayland = final.callPackage ./hydralauncher-wayland.nix { };
 
+  # ---- system maintenance -----------------------------------------------
+  nixos-updater = final.callPackage ./nixos-updater { };
+
+  # Linus' mainline tree, pinned to a tag in pkgs/linux-mainline/pin.json.
+  # `linuxPackagesFor` wraps it into a full kernel package set (out-of-tree
+  # modules included), which is what boot.kernelPackages wants.
+  linux-mainline = final.callPackage ./linux-mainline { };
+  linuxPackages-mainline = final.linuxPackagesFor final.linux-mainline;
+
   # ---- SIVA voice-assistant stack ---------------------------------------
   siva = final.callPackage ./siva { };
   siva-type = final.callPackage ./siva-type { };
@@ -20,6 +29,9 @@ final: prev: {
 
   # ---- applications -----------------------------------------------------
   davinci-resolve-studio-unofficial = final.callPackage ./davinci-resolve.nix { };
+
+  # Helium browser — AppImage-only upstream, Ozone-Wayland wrapped like Hydra.
+  helium = final.callPackage ./helium.nix { };
 
   # ---- toolchains -------------------------------------------------------
   mingw32-cc = final.callPackage ./mingw32-cc.nix { };

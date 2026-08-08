@@ -70,6 +70,9 @@
         let pkgs = pkgsFor system; in
         {
           inherit (pkgs)
+            nixos-updater
+            linux-mainline
+            helium
             sddm-ascii-city
             siva
             siva-type

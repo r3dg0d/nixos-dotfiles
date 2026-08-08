@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# Update everything this machine gets software from, then rebuild NixOS.
+#
+# Ordering is the point: every source is moved *first*, then one rebuild picks
+# up all of it at once. Building before switching means the closure diff is
+# visible — and refusable — before anything about the running system changes.
+set -uo pipefail
+
+FLAKE="${NIXOS_UPDATER_FLAKE:-$HOME/nixos-dotfiles}"
+HOST="${NIXOS_UPDATER_HOST:-$(cat /etc/hostname 2>/dev/null || hostname)}"
+
+# ---- presentation ---------------------------------------------------------
+if [[ -t 1 ]]; then
+  G=$'\e[38;5;46m'; W=$'\e[1;37m'; D=$'\e[38;5;240m'; R=$'\e[38;5;203m'
+  Y=$'\e[38;5;214m'; N=$'\e[0m'
+else
+  G=""; W=""; D=""; R=""; Y=""; N=""
+fi
+
+step()  { printf '\n%s▸ %s%s\n' "$G" "$1" "$N"; }
+info()  { printf '  %s%s%s\n' "$D" "$1" "$N"; }
+warn()  { printf '  %s! %s%s\n' "$Y" "$1" "$N"; }
+fail()  { printf '\n%s✗ %s%s\n' "$R" "$1" "$N" >&2; exit 1; }
+ok()    { printf '  %s✓ %s%s\n' "$G" "$1" "$N"; }
+
+usage() {
+  cat <<EOF
+${W}nixos-update${N} — update every source this machine pulls from, then rebuild.
+
+  ${W}usage:${N} nixos-update [options]
+
+  ${W}what runs${N}                     (each --no-* switch turns one off)
+    --no-kernel      mainline kernel pin  (default: on when the pin is in use)
+    --no-flake       nix flake update     (nixpkgs, home-manager, …)
+    --no-flatpak     flatpak update
+    --no-profile     nix profile upgrade
+    --firmware       fwupdmgr update      (off by default — it flashes hardware)
+
+  ${W}rebuild${N}
+    --no-rebuild     move the sources, do not rebuild
+    --boot           activate on next boot instead of immediately
+    --dry            build and show the diff, never switch
+
+  ${W}after${N}
+    --gc [DAYS]      delete generations older than DAYS (default 14)
+    --optimise       hard-link duplicate store paths
+    --commit         git-commit flake.lock / pin.json if they moved
+
+  ${W}other${N}
+    -y, --yes        never prompt
+    --no-rc          kernel: track final releases only, no -rc
+    --check          just run nixos-update-check and exit
+    -h, --help       this
+EOF
+}
+
+# ---- options --------------------------------------------------------------
+# The kernel step defaults to whatever the NixOS module told us: there is no
+# point rewriting a pin the running configuration does not read.
+do_kernel="${NIXOS_UPDATER_KERNEL:-0}"
+do_flake=1 do_flatpak=1 do_profile=1 do_firmware=0
+do_rebuild=1 rebuild_op="switch" dry=0
+do_gc=0 gc_days=14 do_optimise=0 do_commit=0
+assume_yes=0 no_rc=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --kernel)     do_kernel=1 ;;
+    --no-kernel)  do_kernel=0 ;;
+    --no-flake)   do_flake=0 ;;
+    --no-flatpak) do_flatpak=0 ;;
+    --no-profile) do_profile=0 ;;
+    --firmware)   do_firmware=1 ;;
+    --no-rebuild) do_rebuild=0 ;;
+    --boot)       rebuild_op="boot" ;;
+    --dry)        dry=1 ;;
+    --optimise)   do_optimise=1 ;;
+    --commit)     do_commit=1 ;;
+    --no-rc)      no_rc=1 ;;
+    -y|--yes)     assume_yes=1 ;;
+    --gc)
+      do_gc=1
+      if [[ ${2:-} =~ ^[0-9]+$ ]]; then gc_days="$2"; shift; fi ;;
+    --check)      exec nixos-update-check ;;
+    -h|--help)    usage; exit 0 ;;
+    *)            printf '%sunknown option: %s%s\n\n' "$R" "$1" "$N" >&2; usage; exit 2 ;;
+  esac
+  shift
+done
+
+confirm() {
+  (( assume_yes )) && return 0
+  [[ -t 0 ]] || return 0   # non-interactive (a unit, a pipe): do not block
+  local reply
+  printf '\n  %s%s%s [Y/n] ' "$W" "$1" "$N"
+  read -r reply
+  [[ -z $reply || $reply =~ ^[Yy] ]]
+}
+
+[[ -f "$FLAKE/flake.nix" ]] || fail "no flake at $FLAKE (set NIXOS_UPDATER_FLAKE)"
+cd "$FLAKE" || fail "cannot enter $FLAKE"
+
+printf '%s╭─ nixos-update ─ %s%s#%s%s\n' "$G" "$W" "$FLAKE" "$HOST" "$N"
+
+# Flakes in a git checkout are built from the git tree, so a file nobody has
+# added yet simply is not there as far as the build is concerned. That failure
+# mode reads as a baffling "attribute missing", so say it plainly up front.
+if git -C "$FLAKE" rev-parse --git-dir >/dev/null 2>&1; then
+  untracked="$(git -C "$FLAKE" ls-files --others --exclude-standard -- '*.nix' '*.json' | head -5)"
+  if [[ -n $untracked ]]; then
+    warn "untracked files — the rebuild will not see them until they are git-added:"
+    printf '      %s%s%s\n' "$D" "$(echo "$untracked" | tr '\n' ' ')" "$N"
+  fi
+fi
+
+changed_sources=0
+
+# ---- 1. the kernel --------------------------------------------------------
+if (( do_kernel )); then
+  step "Mainline kernel pin"
+  if command -v nixos-kernel-pin >/dev/null 2>&1; then
+    pin_args=(); (( no_rc )) && pin_args+=(--no-rc)
+    before="$(sha1sum "$FLAKE/pkgs/linux-mainline/pin.json" 2>/dev/null | cut -d' ' -f1)"
+    if nixos-kernel-pin "${pin_args[@]}"; then
+      after="$(sha1sum "$FLAKE/pkgs/linux-mainline/pin.json" 2>/dev/null | cut -d' ' -f1)"
+      [[ $before != "$after" ]] && changed_sources=1
+    else
+      warn "kernel pin update failed — continuing with the current pin"
+    fi
+  else
+    warn "nixos-kernel-pin not on PATH; skipping"
+  fi
+else
+  info "kernel: skipped (mainline pin not in use — see modules/nixos/kernel.nix)"
+fi
+
+# ---- 2. flake inputs ------------------------------------------------------
+if (( do_flake )); then
+  step "Flake inputs"
+  before="$(sha1sum "$FLAKE/flake.lock" 2>/dev/null | cut -d' ' -f1)"
+  nix flake update --flake "$FLAKE" --extra-experimental-features 'nix-command flakes' \
+    || fail "nix flake update failed"
+  after="$(sha1sum "$FLAKE/flake.lock" 2>/dev/null | cut -d' ' -f1)"
+  if [[ $before == "$after" ]]; then ok "already current"; else changed_sources=1; fi
+fi
+
+# ---- 3. nix profile -------------------------------------------------------
+# Independent of the system closure: `nix profile` packages are the user's own
+# imperative installs and a rebuild never touches them.
+if (( do_profile )); then
+  step "Nix profile packages"
+  nix profile upgrade --all --extra-experimental-features 'nix-command flakes' 2>&1 \
+    | sed 's/^/  /' || warn "nix profile upgrade reported an error"
+fi
+
+# ---- 4. flatpaks ----------------------------------------------------------
+if (( do_flatpak )); then
+  step "Flatpaks"
+  if command -v flatpak >/dev/null 2>&1; then
+    flatpak update -y 2>&1 | sed 's/^/  /'
+    # Runtimes left behind by an upgraded app are pure waste; nothing else
+    # reclaims them.
+    flatpak uninstall --unused -y 2>&1 | sed 's/^/  /'
+  else
+    info "flatpak not installed; skipping"
+  fi
+fi
+
+# ---- 5. firmware ----------------------------------------------------------
+if (( do_firmware )); then
+  step "Firmware (fwupd)"
+  if command -v fwupdmgr >/dev/null 2>&1; then
+    fwupdmgr refresh --force 2>&1 | sed 's/^/  /'
+    fwupdmgr update -y 2>&1 | sed 's/^/  /'
+  else
+    warn "fwupdmgr not found — set services.fwupd.enable = true to use --firmware"
+  fi
+fi
+
+# ---- 6. rebuild -----------------------------------------------------------
+if (( do_rebuild )); then
+  step "Building $HOST"
+  outdir="$(mktemp -d -t nixos-update-XXXXXX)"
+  # shellcheck disable=SC2064  # expand $outdir now, not at trap time
+  trap "rm -rf '$outdir'" EXIT
+
+  if (( do_kernel )); then
+    info "the mainline kernel is not in any binary cache — expect a long compile"
+  fi
+
+  # nixos-rebuild-ng drops its `result` symlink in the working directory and
+  # has no --out-link, so give it a directory of its own rather than littering
+  # wherever the user happened to be.
+  if ! (cd "$outdir" && nixos-rebuild build --flake "$FLAKE#$HOST"); then
+    fail "build failed — the running system is untouched"
+  fi
+  ok "built $(readlink -f "$outdir/result")"
+
+  step "What changes"
+  if command -v nvd >/dev/null 2>&1; then
+    nvd diff /run/current-system "$outdir/result" 2>&1 | sed 's/^/  /'
+  else
+    nix store diff-closures /run/current-system "$outdir/result" \
+      --extra-experimental-features 'nix-command flakes' 2>&1 | sed 's/^/  /'
+  fi
+
+  if (( dry )); then
+    info "--dry: stopping before activation"
+  elif confirm "Activate this closure (nixos-rebuild $rebuild_op)?"; then
+    step "Activating"
+    sudo nixos-rebuild "$rebuild_op" --flake "$FLAKE#$HOST" || fail "activation failed"
+    ok "system is now generation $(readlink /nix/var/nix/profiles/system | sed 's/system-//;s/-link//')"
+
+    # Comparing the booted closure with the new one is the only reliable way to
+    # know a reboot is genuinely needed rather than merely tidy.
+    if [[ "$(readlink -f /run/booted-system/kernel 2>/dev/null)" \
+       != "$(readlink -f /run/current-system/kernel 2>/dev/null)" ]]; then
+      warn "the kernel changed — reboot to run it"
+    fi
+  else
+    info "not activated"
+  fi
+fi
+
+# ---- 7. housekeeping ------------------------------------------------------
+if (( do_gc )); then
+  step "Collecting garbage older than ${gc_days}d"
+  sudo nix-collect-garbage --delete-older-than "${gc_days}d" 2>&1 | tail -3 | sed 's/^/  /'
+  nix-collect-garbage --delete-older-than "${gc_days}d" 2>&1 | tail -3 | sed 's/^/  /'
+  # Generations are pruned above, but the boot menu only loses their entries on
+  # the next activation.
+  info "run a rebuild to prune the boot menu entries"
+fi
+
+if (( do_optimise )); then
+  step "Optimising the store"
+  nix store optimise --extra-experimental-features 'nix-command flakes' 2>&1 | tail -2 | sed 's/^/  /'
+fi
+
+if (( do_commit )) && (( changed_sources )); then
+  step "Committing source moves"
+  git -C "$FLAKE" add flake.lock pkgs/linux-mainline/pin.json 2>/dev/null
+  if git -C "$FLAKE" diff --cached --quiet; then
+    info "nothing staged"
+  else
+    git -C "$FLAKE" commit -m "flake: update inputs$( (( do_kernel )) && echo ' and kernel pin')" \
+      | sed 's/^/  /'
+  fi
+fi
+
+# ---- 8. refresh the bar ---------------------------------------------------
+# The cached status is stale by definition now; re-checking here is what makes
+# the waybar count drop to zero the moment the update finishes.
+step "Re-checking"
+check_args=(); (( no_rc )) && check_args+=(--no-rc)
+nixos-update-check "${check_args[@]}" || true
+
+printf '\n%s╰─ done%s\n' "$G" "$N"

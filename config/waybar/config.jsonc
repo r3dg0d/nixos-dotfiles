@@ -9,7 +9,7 @@
 
   "modules-left": ["niri/workspaces", "niri/window"],
   "modules-center": ["group/music", "clock"],
-  "modules-right": ["tray", "custom/weather", "temperature", "pulseaudio", "network", "cpu", "memory", "battery", "custom/mirror", "custom/power"],
+  "modules-right": ["tray", "custom/weather", "temperature", "pulseaudio", "network", "cpu", "memory", "battery", "custom/nixupdate", "custom/mirror", "custom/power"],
 
   // NOTE: nerd-font icons are written as \uXXXX escapes on purpose — keep
   // them that way so they survive editors/tools that mangle PUA glyphs.
@@ -158,6 +158,23 @@
   "tray": {
     "icon-size": 16,
     "spacing": 8
+  },
+
+  // ── system updates ──────────────────────────────────────────────────────
+  // Reads the cache `nixos-update-check` writes, so the poll below is a file
+  // read and nothing else. The real check runs on its own systemd user timer
+  // (my.updater.interval) and raises RTMIN+13 when it has a new answer, which
+  // is what makes the count update the moment an update finishes rather than
+  // up to five minutes later. Signal number is my.updater.waybarSignal.
+  "custom/nixupdate": {
+    "exec": "nixos-update-waybar",
+    "return-type": "json",
+    "interval": 300,
+    "signal": 13,
+    "tooltip": true,
+    "on-click": "ghostty --title='NixOS Update' -e sh -c 'nixos-update; printf \"\\n[enter to close] \"; read _'",
+    "on-click-right": "ghostty --title='NixOS Update Check' -e sh -c 'nixos-update-check; printf \"\\n[enter to close] \"; read _'",
+    "on-click-middle": "nixos-update-check --quiet"
   },
 
   "custom/mirror": {
