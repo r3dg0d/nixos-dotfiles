@@ -1,10 +1,11 @@
 import QtQuick 2.15
 
 // ascii-city: black & white animated ASCII rain over a procedural ASCII city.
+//
 // Login music is NOT played here: the greeter has no PipeWire/PulseAudio (it
-// runs as the pre-login `sddm` user), and Qt6 MediaPlayer has no ALSA fallback,
-// so it plays into a void. Instead sddmmusic.ogg is played straight to the
-// sound card by the `sddm-login-music` systemd service (see configuration.nix).
+// runs as the pre-login `sddm` user), and Qt6's MediaPlayer has no ALSA
+// fallback, so a MediaPlayer here plays into a void. Play the track from
+// outside the greeter instead — see "Login music" in the README.
 Rectangle {
     id: root
     color: "#000000"
@@ -30,6 +31,91 @@ Rectangle {
     property bool blinkOn: true
     property bool denied: false
     property bool capsOn: typeof keyboard !== "undefined" && keyboard.capsLock
+
+    // ---- desktop session selection ------------------------------------------
+    // Entirely driven by SDDM's own sessionModel: whatever .desktop files are
+    // installed under the wayland-sessions / xsessions directories show up
+    // here, in SDDM's order, with SDDM's display names. Nothing about niri or
+    // COSMIC is hardcoded — installing a third session makes it appear with no
+    // change to this theme.
+    //
+    // sessionModel is a QAbstractListModel, and the only supported way to read
+    // a row from QML is through a delegate. So an invisible Repeater mirrors
+    // the rows, and rebuildSessions() flattens them into a plain JS array that
+    // ordinary property bindings can depend on. (Reading itemAt() directly
+    // from a binding would not re-evaluate when the model finishes loading.)
+    property var sessions: []
+    property int sessIndex: 0
+    readonly property int sessCount: sessions.length
+    readonly property string sessName: sessCount > 0 && sessIndex < sessCount
+                                       ? sessions[sessIndex].name : "default"
+
+    Item {
+        visible: false
+        Repeater {
+            id: sessionRepeater
+            model: (typeof sessionModel !== "undefined") ? sessionModel : 0
+            delegate: Item {
+                property string sName: model.name !== undefined ? model.name : ""
+                property string sFile: model.file !== undefined ? model.file : ""
+            }
+            onCountChanged: root.rebuildSessions()
+        }
+    }
+
+    function rebuildSessions() {
+        var out = []
+        for (var i = 0; i < sessionRepeater.count; i++) {
+            var it = sessionRepeater.itemAt(i)
+            if (it) out.push({ name: it.sName, file: it.sFile })
+        }
+        sessions = out
+        if (sessIndex >= out.length) sessIndex = 0
+        selectRememberedSession()
+    }
+
+    function baseName(p) { return p ? p.substring(p.lastIndexOf("/") + 1) : "" }
+
+    function cycleSession(step) {
+        if (sessCount < 2) return
+        sessIndex = (sessIndex + step + sessCount) % sessCount
+    }
+
+    // SDDM remembers the last session as an *absolute* path, and on NixOS every
+    // rebuild that changes the session set gives the desktops derivation a new
+    // store hash. The stored path then matches nothing, sessionModel.lastIndex
+    // silently falls back to row 0 — which is COSMIC, since SDDM's populate()
+    // sorts by filename and "cosmic.desktop" < "niri.desktop" — and the user
+    // gets the wrong desktop after every rebuild. Re-resolve the remembered
+    // session against the *basename* instead, which is stable.
+    //
+    // Reading a local file from QML needs QML_XHR_ALLOW_FILE_READ=1 in the
+    // greeter's environment (set in modules/nixos/desktop/sddm.nix on NixOS).
+    // Best-effort throughout: any failure leaves the lastIndex-derived value.
+    readonly property string statePath: "file:///var/lib/sddm/state.conf"
+
+    function selectRememberedSession() {
+        if (sessCount === 0) return
+        try {
+            var xhr = new XMLHttpRequest()
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== XMLHttpRequest.DONE) return
+                try {
+                    var m = /^[ \t]*Session[ \t]*=[ \t]*(.+)$/m.exec(xhr.responseText || "")
+                    if (!m) return
+                    var want = root.baseName(m[1].replace(/\s+$/, ""))
+                    if (!want) return
+                    for (var i = 0; i < root.sessions.length; i++)
+                        if (root.baseName(root.sessions[i].file) === want) {
+                            root.sessIndex = i
+                            return
+                        }
+                } catch (inner) { /* keep the lastIndex fallback */ }
+            }
+            xhr.open("GET", root.statePath)
+            xhr.send()
+        } catch (e) { /* keep the lastIndex fallback */ }
+    }
 
     // ---- rain/city engine state (plain JS data, not bindings) ----
     property var drops: []
@@ -222,7 +308,7 @@ Rectangle {
         x: Math.round(root.cellW * 2); y: Math.round(fm.lineSpacing)
         color: root.cDim
         font.family: root.monoFont; font.pixelSize: root.rainPx
-        text: "+--[ " + ((typeof sddm !== "undefined" && sddm.hostName) ? sddm.hostName : "nixos-btw")
+        text: "+--[ " + ((typeof sddm !== "undefined" && sddm.hostName) ? sddm.hostName : "nixos")
               + " ]--[ " + root.timeStr + " ]--"
     }
 
@@ -237,6 +323,7 @@ Rectangle {
     property int inColsN: 10
     property int rowUser: 0
     property int rowPass: 0
+    property int rowDesk: 0
     property int rowStatus: 0
     property real pChW: pCols > 0 ? panelText.width / pCols : 8
     property real pLnH: pRowsN > 0 ? panelText.height / pRowsN : 16
@@ -253,20 +340,25 @@ Rectangle {
         var fw = 20
         var fl = Math.floor((W - fw - 2) / 2)
         var sp = " ".repeat(fl)
+        imgRow = L.length + 1                 // first line *inside* the frame
         row(sp + "." + "-".repeat(fw) + ".")
         for (i = 0; i < 7; i++) row(sp + "|" + " ".repeat(fw) + "|")
         row(sp + "'" + "-".repeat(fw) + "'")
         row("")
-        row("   user > [" + " ".repeat(26) + "]")
-        row("   pass > [" + " ".repeat(26) + "]")
+        // The three field labels are the same width on purpose, so one
+        // inCol/inColsN measurement (taken off the user row) positions all
+        // three overlaid items.
+        rowUser = L.length; row("   user > [" + " ".repeat(26) + "]")
+        rowPass = L.length; row("   pass > [" + " ".repeat(26) + "]")
+        rowDesk = L.length; row("   desk > [" + " ".repeat(26) + "]")
         row("")
         row("")
         L.push(hr)
 
         pCols = W + 2
         pRowsN = L.length
-        imgRow = 3; imgCol = fl + 2; imgRowsN = 7; imgColsN = fw
-        rowUser = 12; rowPass = 13; rowStatus = L.length - 3
+        imgCol = fl + 2; imgRowsN = 7; imgColsN = fw
+        rowStatus = L.length - 3
         inCol = L[rowUser].indexOf("[") + 2
         inColsN = L[rowUser].indexOf("]") - inCol - 1
         panelText.text = L.join("\n")
@@ -274,9 +366,7 @@ Rectangle {
 
     function doLogin() {
         if (typeof sddm === "undefined") return
-        var idx = (typeof sessionModel !== "undefined" && sessionModel.lastIndex >= 0)
-                  ? sessionModel.lastIndex : 0
-        sddm.login(userInput.text, passInput.text, idx)
+        sddm.login(userInput.text, passInput.text, root.sessIndex)
     }
 
     Item {
@@ -316,10 +406,16 @@ Rectangle {
             maximumLength: root.inColsN
             clip: true
             selectByMouse: true
+            activeFocusOnTab: true
             cursorDelegate: cursorComp
-            text: (typeof userModel !== "undefined" && userModel.lastUser) ? userModel.lastUser : "r3dg0d"
+            text: (typeof userModel !== "undefined" && userModel.lastUser) ? userModel.lastUser : ""
             Keys.onReturnPressed: passInput.forceActiveFocus()
             Keys.onTabPressed: passInput.forceActiveFocus()
+            // Left/Right switch desktop instead of moving the caret. Keys
+            // handlers run before the TextInput's own, so accepting the event
+            // suppresses the caret move.
+            Keys.onLeftPressed: function (event) { root.cycleSession(-1); event.accepted = true }
+            Keys.onRightPressed: function (event) { root.cycleSession(1); event.accepted = true }
         }
 
         TextInput {
@@ -332,6 +428,7 @@ Rectangle {
             maximumLength: root.inColsN
             clip: true
             selectByMouse: true
+            activeFocusOnTab: true
             cursorDelegate: cursorComp
             echoMode: TextInput.Password
             passwordCharacter: "*"
@@ -339,8 +436,105 @@ Rectangle {
             onTextChanged: root.denied = false
             Keys.onReturnPressed: root.doLogin()
             Keys.onEnterPressed: root.doLogin()
-            Keys.onTabPressed: userInput.forceActiveFocus()
+            Keys.onTabPressed: deskField.forceActiveFocus()
             Keys.onEscapePressed: text = ""
+            Keys.onLeftPressed: function (event) { root.cycleSession(-1); event.accepted = true }
+            Keys.onRightPressed: function (event) { root.cycleSession(1); event.accepted = true }
+        }
+
+        // ---- desktop selector ------------------------------------------------
+        // Drawn into the "desk > [ ]" box with the same column and metrics as
+        // the two TextInputs above, so it reads as a third field rather than a
+        // caption. Keyboard: Left/Right (from anywhere in the panel) or, once
+        // focused, also Up/Down; Enter logs straight in. Mouse: click either
+        // arrow, click the name to advance, or scroll anywhere over the field.
+        FocusScope {
+            id: deskField
+            x: root.pChW * root.inCol; y: root.pLnH * root.rowDesk
+            width: root.pChW * root.inColsN; height: root.pLnH
+            activeFocusOnTab: true
+
+            readonly property bool multi: root.sessCount > 1
+            // Bright when focused so "which field am I on" is never ambiguous;
+            // the arrows also blink with the shared cursor timer, matching the
+            // block cursors in the user/pass fields.
+            readonly property color arrowColor:
+                !multi ? "transparent"
+                       : (activeFocus ? (root.blinkOn ? root.cPanel : root.cDim) : root.cDim)
+
+            Keys.onLeftPressed:  function (e) { root.cycleSession(-1); e.accepted = true }
+            Keys.onRightPressed: function (e) { root.cycleSession(1);  e.accepted = true }
+            Keys.onUpPressed:    function (e) { root.cycleSession(-1); e.accepted = true }
+            Keys.onDownPressed:  function (e) { root.cycleSession(1);  e.accepted = true }
+            Keys.onReturnPressed: root.doLogin()
+            Keys.onEnterPressed: root.doLogin()
+            Keys.onTabPressed: userInput.forceActiveFocus()
+
+            Text {
+                id: leftArrow
+                x: 0; width: root.pChW; height: parent.height
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                color: deskField.arrowColor; textFormat: Text.PlainText
+                font.family: root.monoFont; font.pixelSize: root.uiPx
+                text: "<"
+            }
+
+            Text {
+                id: sessLabel
+                // Columns 2 .. inColsN-9, leaving room for the arrows at the
+                // two edges and the "1/2" counter before the right one.
+                x: root.pChW * 2; y: 0
+                width: root.pChW * (root.inColsN - 10); height: parent.height
+                verticalAlignment: Text.AlignVCenter
+                // The selected desktop is the brightest thing in the row — it
+                // is the only element drawn in cPanel rather than cDim.
+                color: root.cPanel
+                textFormat: Text.PlainText
+                font.family: root.monoFont; font.pixelSize: root.uiPx
+                elide: Text.ElideRight
+                text: root.sessName
+            }
+
+            // "1/2" — makes it obvious there is more than one choice, and
+            // where in the list you are. Hidden when there is nothing to pick.
+            Text {
+                x: root.pChW * (root.inColsN - 7)
+                width: root.pChW * 5; height: parent.height
+                horizontalAlignment: Text.AlignRight
+                verticalAlignment: Text.AlignVCenter
+                color: root.cDim; textFormat: Text.PlainText
+                font.family: root.monoFont; font.pixelSize: root.uiPx
+                visible: deskField.multi
+                text: (root.sessIndex + 1) + "/" + root.sessCount
+            }
+
+            Text {
+                x: root.pChW * (root.inColsN - 1)
+                width: root.pChW; height: parent.height
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                color: deskField.arrowColor; textFormat: Text.PlainText
+                font.family: root.monoFont; font.pixelSize: root.uiPx
+                text: ">"
+            }
+
+            // Whole-field mouse handling. The two arrow zones step in their own
+            // direction; anywhere else advances. The wheel steps either way.
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                cursorShape: deskField.multi ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: function (mouse) {
+                    deskField.forceActiveFocus()
+                    if (!deskField.multi) return
+                    root.cycleSession(mouse.x < root.pChW * 2 ? -1 : 1)
+                }
+                onWheel: function (wheel) {
+                    if (!deskField.multi) return
+                    root.cycleSession(wheel.angleDelta.y > 0 ? -1 : 1)
+                }
+            }
         }
 
         Text {
@@ -376,7 +570,8 @@ Rectangle {
             anchors.centerIn: parent
             color: root.cDim
             font.family: root.monoFont; font.pixelSize: root.rainPx
-            text: "[F1] SLEEP   [F2] REBOOT   [F3] POWEROFF"
+            text: (root.sessCount > 1 ? "[<-/->] DESKTOP   " : "")
+                  + "[F1] SLEEP   [F2] REBOOT   [F3] POWEROFF"
         }
     }
     Shortcut { sequence: "F1"; onActivated: if (typeof sddm !== "undefined") sddm.suspend() }
@@ -395,6 +590,12 @@ Rectangle {
     Component.onCompleted: {
         buildPanel()
         initScene()
+        // Preselect whatever was used last. rebuildSessions() has normally
+        // already run from the Repeater's onCountChanged, but call it again so
+        // a model that populated before this component finished is not missed.
+        if (typeof sessionModel !== "undefined" && sessionModel.lastIndex >= 0)
+            sessIndex = sessionModel.lastIndex
+        rebuildSessions()
         passInput.forceActiveFocus()
     }
 }
