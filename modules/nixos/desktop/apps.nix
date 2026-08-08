@@ -37,7 +37,6 @@
     prismlauncher
     pcsx2 # PlayStation 2 emulator
     hydralauncher-wayland # Hydra game launcher (Electron + embedded bittorrent), Ozone-Wayland wrapped
-    kyber-linuxport-unofficial
     davinci-resolve-studio-unofficial # video editor 21.0.3 — vendored from creatorkostas/davinci-resolve-nixos, version-bumped
     areofyl-fetch # animated 3D `fetch` tool (github:areofyl/fetch, via flake overlay)
     browsh # text-mode web browser (drives a headless Firefox, renders to the TTY)

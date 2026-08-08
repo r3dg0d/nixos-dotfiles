@@ -20,7 +20,6 @@ final: prev: {
 
   # ---- applications -----------------------------------------------------
   davinci-resolve-studio-unofficial = final.callPackage ./davinci-resolve.nix { };
-  kyber-linuxport-unofficial = final.callPackage ./kyber-linuxport-unofficial.nix { };
 
   # ---- toolchains -------------------------------------------------------
   mingw32-cc = final.callPackage ./mingw32-cc.nix { };

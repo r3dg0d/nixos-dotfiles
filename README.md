@@ -431,7 +431,7 @@ a few Flatpaks, plus flake inputs and vendored derivations.
 | Steam (Proton, Remote Play) | nixpkg module | Gaming |
 | ProtonPlus | **Flatpak** `com.vysp3r.ProtonPlus` | Proton/Wine version manager |
 | PCSX2 · PrismLauncher | nixpkg | PS2 emulation · Minecraft |
-| Hydra · Kyber | wrapped / vendored | Game launcher · Nexus mod handler |
+| Hydra | wrapped | Game launcher |
 | WiVRn | nixpkg module | OpenXR streaming to a standalone headset |
 
 ### Productivity
@@ -485,7 +485,7 @@ cliphist · Bibata cursors · JetBrains Mono Nerd Font.
 ├── pkgs/                        # everything this repo builds itself
 │   ├── default.nix              #   the overlay (also the nixpkgs overrides)
 │   ├── sddm-ascii-city.nix · siva/ · siva-type/ · siva-voicefetch/
-│   ├── siva-fetch-assets.nix · davinci-resolve.nix · kyber-linuxport-unofficial.nix
+│   ├── siva-fetch-assets.nix · davinci-resolve.nix
 │   └── hydralauncher-wayland.nix · quickshell-mirror.nix · mingw32-cc.nix
 │
 ├── sddm-ascii-city/             # the SDDM theme sources (+ test/run-harness.sh)

@@ -126,8 +126,6 @@ in
       "x-scheme-handler/https" = [ "chromium-browser.desktop" ];
       "x-scheme-handler/about" = [ "chromium-browser.desktop" ];
       "x-scheme-handler/unknown" = [ "chromium-browser.desktop" ];
-      "x-scheme-handler/qrc" = [ "kyber-linuxport-qrc.desktop" ];
-      "x-scheme-handler/nxm" = [ "kyber-linuxport-nxm.desktop" ];
     };
   };
 
