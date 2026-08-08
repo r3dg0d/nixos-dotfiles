@@ -29,6 +29,7 @@ in
   imports = [
     ./llama-server.nix
     ./voicefetch.nix
+    ./type.nix
   ];
 
   options.services.siva = {
