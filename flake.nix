@@ -80,6 +80,8 @@
             siva-fetch-assets
             quickshell-mirror
             hydralauncher-wayland
+            fnkey
+            monitor-brightness
             mingw32-cc;
         });
 

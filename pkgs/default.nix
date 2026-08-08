@@ -12,6 +12,12 @@ final: prev: {
   quickshell-mirror = final.callPackage ./quickshell-mirror.nix { };
   hydralauncher-wayland = final.callPackage ./hydralauncher-wayland.nix { };
 
+  # The Fn + F1…F12 key row: `fnkey` dispatches every binding in
+  # config/niri/config.kdl and drives the quickshell OSD; monitor-brightness is
+  # the DDC/CI half, since desktop ultrawides have no backlight sysfs node.
+  fnkey = final.callPackage ./fnkeys { };
+  monitor-brightness = final.callPackage ./monitor-brightness { };
+
   # ---- system maintenance -----------------------------------------------
   nixos-updater = final.callPackage ./nixos-updater { };
 

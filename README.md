@@ -98,6 +98,23 @@ Everything is themed to the same OLED-black / white / neon-green (`#00ff41`)
 palette — down to the zsh syntax highlighting, the
 [starship](https://starship.rs/) prompt, and the Ghostty colour scheme.
 
+### The gradient sweep
+
+Decoration is one idea applied everywhere: a **white → neon-green gradient**
+mapped across the *whole view* rather than re-run per element.
+
+niri draws it as the focus ring, with `relative-to="workspace-view"`, so each
+focused window shows the slice of the sweep it happens to sit under — white
+over on the left of the view, full green by the right. A row of windows reads
+as one continuous run of light instead of several identical outlines, and
+moving a column re-cuts its colour. The waybar groups take the same sweep
+left-to-right, and the quickshell panels carry it as their edge.
+
+The green *bloom* it replaced is gone. A glow was doing the same job as the
+edge it sat on and smeared it on true black; window shadows are now near-black
+depth instead, invisible over the OLED background by design and earning their
+keep only where something lighter is behind them.
+
 **COSMIC** is installed alongside niri rather than instead of it. Both register
 a Wayland session, and you choose between them at the login screen.
 
@@ -200,6 +217,16 @@ weather, temperatures, volume, network, CPU and memory, a
 [system-update indicator](#the-waybar-widget), the Mirror toggle, and a power
 button that opens the quickshell power menu.
 
+The three groups are edged in successive slices of the
+[gradient sweep](#the-gradient-sweep) — white on the left, full `#00ff41` on
+the right — so the bar continues the line niri draws around windows.
+
+**Scrolling the volume module** raises the same OSD the `Fn` keys do: the
+wheel is wired to `fnkey volume-up` / `fnkey volume-down`, and middle-click to
+`fnkey mute`. waybar's pulseaudio module checks for an `on-scroll-*` command
+and delegates to it *instead of* its own volume handling, so a notch is still
+one 5% step — not two.
+
 ## 🪟 Quickshell widgets
 
 ![Quickshell power menu](assets/quickshell.png)
@@ -208,12 +235,117 @@ Hand-written [quickshell](https://quickshell.org/) components in
 [`config/quickshell/`](config/quickshell), all in the same neon-green theme and
 driven by IPC (`qs ipc call <target> toggle`):
 
+- **OSD** — the Fn-key on-screen display; see [the Fn key row](#-the-fn-key-row)
+- **Web search** — a SearXNG prompt on `Fn+F4`; see [the Fn key row](#-the-fn-key-row)
 - **Clipboard manager** — `cliphist` history with fuzzy search (`Mod+C`)
 - **Wi-Fi picker** — `nmcli` network menu (waybar network click)
 - **Power menu** — logout / restart / shutdown / sleep
 - **Mirror** — a floating webcam window
 - **SIVA overlays** — the voice-assistant status panel, live agentic screen
   stream, dictation overlay, voice-model browser, and enrollment wizard
+
+> Quickshell does **not** hot-reload this config the way niri does. After
+> editing anything under `config/quickshell/`, restart it — `pkill quickshell`
+> then `qs -d`, or just log out and back in — or the change will not appear.
+
+---
+
+## ⌨️ The Fn key row
+
+`Fn` + `F1…F12` is wired end to end: every key does its job *and* draws an
+on-screen display for it.
+
+| Key | Action | Backend |
+| --- | --- | --- |
+| `F1` / `F2` | Display brightness − / + | DDC/CI over I²C ([below](#display-brightness-on-desktop-monitors)) |
+| `F3` | Toggle the niri overview | `niri msg action toggle-overview` |
+| `F4` | Web search prompt | quickshell → SearXNG on `localhost:8888` |
+| `F5` | Microphone mute switch | `wpctl` on `@DEFAULT_AUDIO_SOURCE@` |
+| `F6` | Webcam mirror | the quickshell Mirror widget |
+| `F7` / `F8` / `F9` | Previous / play-pause / next | `playerctl` (MPRIS) |
+| `F10` | Mute output | `wpctl` on `@DEFAULT_AUDIO_SINK@` |
+| `F11` / `F12` | Volume − / + | `wpctl`, capped at 100% |
+
+`Mod+O` and `Mod+S` are keyboard-independent aliases for the overview and the
+search prompt. Scrolling the waybar volume module and middle-clicking it go
+through the same `fnkey` actions, so they raise the same OSD.
+
+### How it fits together
+
+One dispatcher, [`fnkey`](pkgs/fnkeys), sits behind every binding in
+[`config/niri/config.kdl`](config/niri/config.kdl). It performs the action,
+reads back the state the system actually landed in, and hands that to the
+quickshell OSD as a small JSON payload:
+
+```sh
+fnkey volume-up
+qs ipc call osd notify '{"kind":"bar","icon":"󰕾","label":"Volume","value":63}'
+```
+
+Two reasons it is built this way rather than binding `wpctl` to the keys
+directly. The OSD can never disagree with reality, because the number it shows
+was read *after* the change — not predicted before it. And the IPC call is
+best-effort: if quickshell is not running, the key still works, it just does so
+quietly.
+
+The OSD ([`config/quickshell/Osd.qml`](config/quickshell/Osd.qml)) draws on
+every monitor, in two shapes — a segmented meter for brightness and volume, a
+toast with one detail line for the switches and the transport. 75% black glass,
+neon-green glow, corner brackets, scanlines; a muted channel turns red.
+
+The bindings use the standard `XF86*` keysyms the keyboard's Fn layer emits, so
+they do not collide with the bare `F7`/`F8`/`F9` SIVA binds. If a key does
+nothing, find out what it really sends with `wev` and rename the bind — niri
+hot-reloads the file, so it is a one-line fix.
+
+### Display brightness on desktop monitors
+
+Two 3440×1440 ultrawides have no `/sys/class/backlight`. Their panel brightness
+is a **DDC/CI** register the GPU writes over the display cable's I²C lines, so
+`brightnessctl` has nothing to talk to and the keys are dead out of the box.
+
+[`monitor-brightness`](pkgs/monitor-brightness) drives it through `ddcutil`
+(VCP feature `0x10`), with the two things that make it usable on a keypress:
+
+- **Cached bus discovery.** `ddcutil detect` costs about a second, so the I²C
+  bus numbers are probed once into `$XDG_RUNTIME_DIR` and every later call is a
+  direct `--bus N setvcp`.
+- **Coalesced writes.** A held key produces far more events than a panel can
+  answer over I²C. The level is updated instantly in a state file — which is
+  what the OSD reads — while a single background applier drains it towards the
+  hardware, collapsing a burst of presses into the few writes the monitors can
+  actually take.
+
+Access comes from `hardware.i2c.enable` plus the `i2c` group, both set in
+[`modules/nixos/desktop/fnkeys.nix`](modules/nixos/desktop/fnkeys.nix). **The
+group membership only lands on your next login**, so brightness stays dead
+until you log out and back in after the first rebuild.
+
+```sh
+monitor-brightness status   # which backend, which buses, what level
+monitor-brightness detect   # re-probe after replugging a cable
+monitor-brightness set 60
+ddcutil detect              # the raw view, when the wrapper finds nothing
+```
+
+If no DDC-capable display answers, it falls back to `brightnessctl` on an
+internal backlight rather than failing, so the same keys work on a laptop.
+
+### The search prompt
+
+`Fn+F4` (or `Mod+S`) opens
+[`WebSearch.qml`](config/quickshell/WebSearch.qml): type, press Enter, and the
+query opens in the local **SearXNG** instance —
+`http://localhost:8888/search?q=…`, the same one
+[`services.searx`](modules/nixos/services.nix) already runs for the browser
+omnibox and for SIVA's `web_search` tool. Nothing reaches a third-party search
+box on the way out. SearXNG's `!bangs` are passed through untouched, and the
+recent-query list is in memory only — it dies with the session.
+
+```sh
+qs ipc call websearch toggle          # the prompt
+qs ipc call websearch query "ddcutil" # search without the UI
+```
 
 ---
 
@@ -415,6 +547,13 @@ To change it, replace the file in `assets/wallpapers/` and rebuild.
   Wayland screenshot + annotation tool bound to `PrtSc`. `grim`/`slurp` capture
   → a Quickshell overlay for arrows, boxes, circles, freehand and text →
   composited back onto the original capture with cairo at native resolution.
+- **`fnkey`** — the dispatcher behind every `Fn` + `F1…F12` binding: does the
+  thing, then hands the resulting state to the quickshell OSD. See
+  [The Fn key row](#-the-fn-key-row).
+- **`monitor-brightness`** — DDC/CI brightness for monitors with no backlight
+  sysfs node, with cached bus discovery and coalesced writes so it survives a
+  held key. See
+  [Display brightness](#display-brightness-on-desktop-monitors).
 - **[SIVA](https://github.com/r3dg0d/siva)** +
   [siva-type](https://github.com/r3dg0d/siva-type) +
   [siva-voicefetch](https://github.com/r3dg0d/siva-voicefetch)
@@ -497,6 +636,7 @@ Papirus-Dark for GTK.
 │   │   ├── audio.nix            #   PipeWire + WirePlumber
 │   │   ├── hardware/nvidia.nix
 │   │   ├── desktop/{sddm,niri,cosmic,portals,apps}.nix
+│   │   ├── desktop/fnkeys.nix   #   Fn + F1…F12: i2c access + the tools
 │   │   ├── programs.nix         #   CLI + security tooling
 │   │   ├── services.nix         #   Jellyfin, SearXNG, WiVRn
 │   │   ├── virtualisation.nix   #   libvirt/QEMU
@@ -510,6 +650,8 @@ Papirus-Dark for GTK.
 │   ├── nixos-updater/           #   the update checker/updater + waybar widget
 │   ├── linux-mainline/          #   torvalds/linux, pinned in pin.json
 │   ├── helium.nix               #   the browser: AppImage + Ozone-Wayland wrapper
+│   ├── fnkeys/                  #   the Fn + F1…F12 dispatcher
+│   ├── monitor-brightness/      #   DDC/CI brightness for the ultrawides
 │   ├── sddm-ascii-city.nix · siva/ · siva-type/ · siva-voicefetch/
 │   ├── siva-fetch-assets.nix · davinci-resolve.nix
 │   └── hydralauncher-wayland.nix · quickshell-mirror.nix · mingw32-cc.nix
@@ -684,6 +826,10 @@ nix flake check                           # evaluates AND builds every host
 | Typing does not work | `systemctl status ydotoold` and `id` — you must be in the `ydotool` group |
 | Wallpaper missing | Home Manager has not run for that user; `systemctl status home-manager-$USER` |
 | An AppImage app paints a blank window | see below — it is the NVIDIA/Ozone trap, not a crash |
+| A new quickshell widget never appears | quickshell does not hot-reload; `pkill quickshell && qs -d` |
+| `Fn`+`F1`/`F2` does nothing | `monitor-brightness status` — if it says `brightnessctl`, no DDC display answered: check `id` for the `i2c` group (needs a fresh login) and `ls /dev/i2c-*` |
+| Another `Fn` key does nothing | `wev` and press it; the keysym it prints is what the bind in `config/niri/config.kdl` should be named |
+| An `Fn` key works but shows no OSD | quickshell is not running — the action is deliberately independent of it |
 | `nixos-update` reports a section error | run `nixos-update-check` by hand; the failing step prints its own message |
 
 ### AppImage apps that paint a blank window

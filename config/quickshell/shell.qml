@@ -15,6 +15,9 @@ ShellRoot {
     SivaEnroll {}
     Stream {}       // live dual-monitor feed shown while SIVA operates agentically
 
+    Osd {}          // Fn + F1…F12 on-screen display; `qs ipc call osd show <json>`
+    WebSearch {}    // SearXNG launcher; `qs ipc call websearch toggle` (Fn+F4)
+
     Wifi {}         // nmcli wifi picker; `qs ipc call wifi toggle` (waybar network click)
     Power {}        // power menu; `qs ipc call power toggle` (waybar power click)
     Mirror {}       // floating webcam mirror; `qs ipc call mirror toggle` (waybar mirror click)

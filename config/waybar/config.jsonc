@@ -155,12 +155,21 @@
     "on-click": "qs ipc call wifi toggle"
   },
 
+  // Scrolling the icon goes through `fnkey`, exactly like Fn+F11/F12, so the
+  // wheel raises the quickshell OSD as well as the volume. Defining
+  // on-scroll-* replaces waybar's own internal volume handling rather than
+  // stacking on top of it, so one notch stays one 5% step; the module text
+  // still follows pipewire either way.
   "pulseaudio": {
     "format": "{icon} {volume}%",
     "format-muted": " muted",
     "format-icons": { "default": ["", "", ""] },
     "on-click": "ghostty --title='Audio Switcher' -e node $HOME/nixos-dotfiles/config/scripts/audio-switcher/cli.js",
-    "on-click-right": "pavucontrol"
+    "on-click-right": "pavucontrol",
+    "on-click-middle": "fnkey mute",
+    "on-scroll-up": "fnkey volume-up",
+    "on-scroll-down": "fnkey volume-down",
+    "smooth-scrolling-threshold": 1
   },
 
   "tray": {

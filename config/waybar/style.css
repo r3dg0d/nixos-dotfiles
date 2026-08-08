@@ -12,7 +12,16 @@ window#waybar {
   color: #ffffff;
 }
 
-/* the bar body — pure black with a subtle green glow ring */
+/* The bar body carries the same white → neon-green sweep niri draws around a
+   focused window, and for the same reason: one run of light across the whole
+   desk rather than three identically-outlined boxes. niri maps its gradient to
+   the workspace view, so the bar picks up where that leaves off — the left
+   group starts white-hot and the right group lands on full #00ff41.
+
+   GTK CSS has no gradient border, so each group takes the slice of the sweep
+   it sits under as a solid edge. Three stops is enough to read as continuous
+   at this width. The old outer green bloom is gone: it did the same job as the
+   edge and smeared it on OLED black. */
 .modules-left,
 .modules-center,
 .modules-right {
@@ -21,8 +30,12 @@ window#waybar {
   border-radius: 10px;
   padding: 0 6px;
   margin: 2px 0;
-  box-shadow: 0 0 6px #00ff41;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.8);
 }
+
+.modules-left   { border-color: #ffffff; }
+.modules-center { border-color: #7dff9f; }
+.modules-right  { border-color: #00ff41; }
 
 #workspaces button {
   color: #555555;

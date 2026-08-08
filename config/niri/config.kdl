@@ -39,23 +39,42 @@ layout {
     }
     default-column-width { proportion 0.5; }
 
-    // White borders as the active frame...
+    // The frame is a white → neon-green sweep rather than a flat ring, and
+    // `relative-to="workspace-view"` is the point of it: the gradient is
+    // mapped across the whole visible workspace, not re-run per window. Every
+    // focused window therefore shows the *slice* of the sweep it happens to
+    // sit under — white over on the left of the view, full green by the right
+    // — so a row of windows reads as one continuous run of light instead of
+    // several identical outlines. Moving a column re-cuts its colour.
     focus-ring {
-        width 3
-        active-color "#ffffff"
-        inactive-color "#1a1a1a"
+        width 2
+        active-gradient from="#ffffff" to="#00ff41" angle=135 relative-to="workspace-view"
+        inactive-color "#141414"
     }
     border {
         off
     }
 
-    // ...with a neon-green glow bleeding out behind focused windows.
+    // Depth instead of bloom. The old shadow was a green glow doing the same
+    // job as the ring, which on OLED black smeared the edge it was supposed to
+    // define; this leaves the gradient as the only light on the desktop.
+    //
+    // Note what a near-black shadow can and cannot do here: over the OLED
+    // background it is invisible by construction, which is the point — no
+    // grey wash on true black. It earns its keep on the layers that *do* have
+    // something behind them: floating windows over other windows, and the
+    // lighter regions of a future wallpaper.
     shadow {
         on
-        softness 28
-        spread 4
-        offset x=0 y=3
-        color "#00ff4199"
+        softness 24
+        spread 0
+        offset x=0 y=8
+        color "#000000cc"
+    }
+
+    // Where a dragged window would land, in the same green.
+    insert-hint {
+        gradient from="#00ff4166" to="#00b32d66" angle=135 relative-to="workspace-view"
     }
 }
 
@@ -192,8 +211,55 @@ binds {
     Print { spawn "feathershot"; }
     Ctrl+Print { spawn "feathershot" "-f"; }
 
-    // Audio (via pipewire/wpctl)
-    XF86AudioRaiseVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.1+"; }
-    XF86AudioLowerVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.1-"; }
-    XF86AudioMute        allow-when-locked=true { spawn "wpctl" "set-mute" "@DEFAULT_AUDIO_SINK@" "toggle"; }
+    // ── Fn + F1…F12 ──────────────────────────────────────────────────────
+    // The keyboard's Fn layer emits the standard XF86 media/system keysyms,
+    // not F1…F12, which is why these do not collide with the bare F7/F8/F9
+    // SIVA binds above.
+    //
+    // Every one of them goes through `fnkey` (pkgs/fnkeys): it performs the
+    // action and then hands the resulting state to the quickshell OSD
+    // (config/quickshell/Osd.qml), so the visual can never disagree with what
+    // actually happened. Run `fnkey` with no argument for the action list.
+    //
+    // If a key does nothing, find out what it really emits with `wev` and
+    // rename the bind — niri hot-reloads this file, so it is a one-line fix.
+
+    // F1 / F2 — display brightness. Desktop monitors have no backlight sysfs
+    // node; this drives the panels over DDC/CI (see pkgs/monitor-brightness).
+    XF86MonBrightnessDown allow-when-locked=true hotkey-overlay-title="Brightness down (DDC/CI)" { spawn "fnkey" "brightness-down"; }
+    XF86MonBrightnessUp   allow-when-locked=true hotkey-overlay-title="Brightness up (DDC/CI)"   { spawn "fnkey" "brightness-up"; }
+
+    // F3 — the niri overview. Which keysym the "task view" key sends is not
+    // standardised, so the three plausible ones are all bound to it.
+    XF86LaunchA  hotkey-overlay-title="Overview" { spawn "fnkey" "overview"; }
+    XF86LaunchB  hotkey-overlay-title="Overview" { spawn "fnkey" "overview"; }
+    XF86TaskPane hotkey-overlay-title="Overview" { spawn "fnkey" "overview"; }
+
+    // F4 — SearXNG search widget (config/quickshell/WebSearch.qml)
+    XF86Search repeat=false hotkey-overlay-title="Web search (SearXNG)" { spawn "fnkey" "search"; }
+
+    // F5 — microphone mute switch
+    XF86AudioMicMute allow-when-locked=true repeat=false hotkey-overlay-title="Microphone mute" { spawn "fnkey" "mic-mute"; }
+
+    // F6 — the webcam mirror overlay (config/quickshell/Mirror)
+    XF86WebCam  repeat=false hotkey-overlay-title="Webcam mirror" { spawn "fnkey" "webcam"; }
+    XF86Display repeat=false hotkey-overlay-title="Webcam mirror" { spawn "fnkey" "webcam"; }
+
+    // F7 / F8 / F9 — transport, over MPRIS (playerctl), so it drives whatever
+    // is actually playing: mpd/rmpc, mpv, the browser.
+    XF86AudioPrev allow-when-locked=true repeat=false hotkey-overlay-title="Previous track"     { spawn "fnkey" "previous"; }
+    XF86AudioPlay allow-when-locked=true repeat=false hotkey-overlay-title="Play / pause"       { spawn "fnkey" "play-pause"; }
+    XF86AudioNext allow-when-locked=true repeat=false hotkey-overlay-title="Next track"         { spawn "fnkey" "next"; }
+    XF86AudioPause allow-when-locked=true repeat=false { spawn "fnkey" "play-pause"; }
+
+    // F10 / F11 / F12 — output volume
+    XF86AudioMute        allow-when-locked=true repeat=false hotkey-overlay-title="Mute output" { spawn "fnkey" "mute"; }
+    XF86AudioLowerVolume allow-when-locked=true hotkey-overlay-title="Volume down"              { spawn "fnkey" "volume-down"; }
+    XF86AudioRaiseVolume allow-when-locked=true hotkey-overlay-title="Volume up"                { spawn "fnkey" "volume-up"; }
+
+    // Keyboard-independent aliases for the two Fn keys worth having on the
+    // home row as well — and the only way to reach them from a board with no
+    // Fn layer at all.
+    Mod+O { spawn "fnkey" "overview"; }
+    Mod+S { spawn "fnkey" "search"; }
 }

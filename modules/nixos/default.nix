@@ -14,6 +14,7 @@
     ./hardware/nvidia.nix
     ./desktop/sddm.nix
     ./desktop/niri.nix
+    ./desktop/fnkeys.nix
     ./desktop/cosmic.nix
     ./desktop/portals.nix
     ./desktop/apps.nix
