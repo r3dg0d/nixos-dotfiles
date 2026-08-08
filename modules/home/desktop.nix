@@ -1,5 +1,5 @@
-# Desktop dotfiles: the live-editable config symlinks, cursor theme and
-# default applications.
+# Desktop dotfiles: the live-editable config symlinks, Ghostty, the cursor
+# theme and default applications.
 { config, lib, pkgs, osConfig, ... }:
 
 let
@@ -13,13 +13,63 @@ let
 
 in
 {
-  # ---- live-editable configs ----------------------------------------------
-  xdg.configFile = lib.genAttrs
-    [ "nvim" "niri" "ratty" "waybar" "rofi" "mako" "quickshell" "mpv" "rmpc" "fastfetch" ]
-    (name: {
-      source = liveLink "${dotfiles}/${name}/";
-      recursive = true;
-    });
+  xdg.configFile = lib.mkMerge [
+    # ---- live-editable configs --------------------------------------------
+    (lib.genAttrs
+      [ "nvim" "niri" "ratty" "waybar" "rofi" "mako" "quickshell" "mpv" "rmpc" "fastfetch" ]
+      (name: {
+        source = liveLink "${dotfiles}/${name}/";
+        recursive = true;
+      }))
+
+    {
+      # ---- Ghostty ---------------------------------------------------------
+      # Written as a plain config file rather than through programs.ghostty so
+      # it does not depend on that module existing in a given Home Manager
+      # release. Themed to match the rest of the rice: OLED black, white text,
+      # neon-green cursor and selection.
+      "ghostty/config".text = ''
+        font-family = JetBrainsMono Nerd Font Mono
+        font-size = 12
+
+        background = #000000
+        foreground = #ffffff
+        background-opacity = 1.0
+
+        cursor-color = #00ff41
+        cursor-style = block
+        cursor-style-blink = true
+
+        selection-background = #00ff41
+        selection-foreground = #000000
+
+        # normal
+        palette = 0=#0a0a0a
+        palette = 1=#ff2b2b
+        palette = 2=#00ff41
+        palette = 3=#d8d8d8
+        palette = 4=#5f5f5f
+        palette = 5=#8c8c8c
+        palette = 6=#39ff14
+        palette = 7=#f2f2f2
+        # bright
+        palette = 8=#3a3a3a
+        palette = 9=#ff5555
+        palette = 10=#39ff14
+        palette = 11=#ffffff
+        palette = 12=#8c8c8c
+        palette = 13=#bcbcbc
+        palette = 14=#00ff41
+        palette = 15=#ffffff
+
+        window-decoration = false
+        window-padding-x = 8
+        window-padding-y = 8
+        confirm-close-surface = false
+        shell-integration = zsh
+      '';
+    }
+  ];
 
   # ---- cursor --------------------------------------------------------------
   # Bibata Modern Classic cursor (gtk + x11 themes, XCURSOR_* env vars)

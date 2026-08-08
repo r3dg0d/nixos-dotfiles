@@ -3,10 +3,11 @@
 { pkgs, ... }:
 
 {
-  # Terminals. ratty is the daily driver ($TERMINAL, see modules/home);
-  # alacritty is the fallback that Mod+Shift+Return opens when a ratty change
-  # breaks something.
+  # Terminals. ghostty is the primary GPU-accelerated one; ratty is the TUI-ish
+  # daily driver ($TERMINAL, see modules/home); alacritty is the fallback that
+  # Mod+Shift+Return opens when a Ghostty/ratty change breaks something.
   environment.systemPackages = with pkgs; [
+    ghostty
     ratty
     alacritty
     nautilus
