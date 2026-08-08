@@ -2,10 +2,23 @@
 #
 # Architecture, as it actually works (see pkgs/siva/src/bin):
 #
-# This module holds the options the whole stack shares, and the system-level
-# support it needs (the ydotoold socket, nix-ld for MemPalace's wheels, the
-# tools on the interactive $PATH). The user services that supervise the
-# daemons are added in the commits that follow.
+#   siva-daemon              long-lived orchestrator. Owns /tmp/siva.sock and
+#                            speaks newline-JSON to the Quickshell overlay
+#                            (config/quickshell/Siva.qml). Captures audio with
+#                            pw-record, transcribes with whisper-cli, talks to
+#                            llama-server over HTTP on 127.0.0.1:8090, acts on
+#                            the desktop through niri msg / ydotool / wtype /
+#                            grim / tesseract, and speaks through piper.
+#   siva-wake                always-on "Siva" wake-word listener. On a
+#                            confirmed detection it sends {"type":"toggle"} to
+#                            siva-daemon's socket — exactly like pressing F8.
+#   siva                     the F8 toggle script. Talks to the socket; starts
+#                            the daemon itself if it is not running.
+#   siva-enroll              wake-word enrollment wizard (trains verifier.pkl).
+#
+# So the daemons are the things worth supervising, and the toggle scripts are
+# just clients. That is exactly how the units below are shaped: one user
+# service per daemon, nothing invented around the client scripts.
 { config, lib, pkgs, ... }:
 
 let
@@ -40,6 +53,10 @@ in
         deliberately not in the nix store, since it is multi-gigabyte
         user data that changes independently of the system.
       '';
+    };
+
+    wake.enable = lib.mkEnableOption "the always-on \"Siva\" wake-word listener" // {
+      default = true;
     };
 
     searxngUrl = lib.mkOption {
@@ -99,6 +116,87 @@ in
       stdenv.cc.cc # libstdc++/libgcc for onnxruntime
       zlib
     ];
+
+    systemd.user.services.siva = {
+      description = "SIVA voice assistant daemon";
+      documentation = [ "https://github.com/r3dg0d/siva" ];
+      # Wayland, PipeWire and the ydotoold socket all have to exist first, so
+      # this is a graphical-session service rather than a default.target one.
+      # Both niri (`niri --session`) and cosmic-session import the session
+      # environment into systemd and pull up graphical-session.target, so the
+      # unit sees WAYLAND_DISPLAY / XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS
+      # without any of them being hardcoded here.
+      after = [ "graphical-session.target" "siva-llama-server.service" ];
+      wants = [ "siva-llama-server.service" ];
+      # A crash loop here is usually a missing model or a dead llama-server,
+      # neither of which fixes itself quickly — back off rather than spin.
+      # (These belong in [Unit]; systemd silently ignores them in [Service].)
+      startLimitIntervalSec = 300;
+      startLimitBurst = 5;
+      partOf = [ "graphical-session.target" ];
+      wantedBy = [ "graphical-session.target" ];
+
+      environment = {
+        SIVA_SEARXNG = cfg.searxngUrl;
+        SIVA_LLAMA_CTX = toString config.services.siva.llama.contextSize;
+        YDOTOOL_SOCKET = "/run/ydotoold/socket";
+      } // cfg.extraEnvironment;
+
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${cfg.package}/bin/siva-daemon";
+        Restart = "on-failure";
+        RestartSec = 3;
+        # A crash loop here is usually a missing model or a dead llama-server,
+        # neither of which fixes itself quickly — back off rather than spin.
+
+        # Hardening. Kept deliberately mild: SIVA's entire job is to look at
+        # and drive the desktop, so it needs /tmp (its own socket lives at
+        # /tmp/siva.sock and the overlay connects to it), the Wayland socket,
+        # PipeWire, /dev/uinput via ydotoold, and the GPU nodes. What is left
+        # is still worth having.
+        NoNewPrivileges = true;
+        RestrictSUIDSGID = true;
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        ProtectHostname = true;
+        ProtectClock = true;
+      };
+    };
+
+    systemd.user.services.siva-wake = lib.mkIf cfg.wake.enable {
+      description = "SIVA wake-word listener (\"Siva\")";
+      documentation = [ "https://github.com/r3dg0d/siva" ];
+      # Nothing to toggle until the daemon owns its socket.
+      after = [ "graphical-session.target" "siva.service" ];
+      requires = [ "siva.service" ];
+      startLimitIntervalSec = 300;
+      startLimitBurst = 5;
+      partOf = [ "graphical-session.target" ];
+      wantedBy = [ "graphical-session.target" ];
+
+      environment = cfg.extraEnvironment;
+
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${cfg.package}/bin/siva-wake";
+        Restart = "on-failure";
+        RestartSec = 5;
+
+        NoNewPrivileges = true;
+        RestrictSUIDSGID = true;
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        ProtectHostname = true;
+        ProtectClock = true;
+      };
+    };
 
     # Fail the build rather than the login if someone points SIVA at root.
     assertions = [

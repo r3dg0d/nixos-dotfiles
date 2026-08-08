@@ -83,14 +83,11 @@ spawn-at-startup "qs"
 // than hardcoded so the same config works for any user.
 spawn-at-startup "sh" "-c" "exec swaybg -m fill -i \"$HOME/Pictures/Wallpaper/wallpaper.jpg\""
 
-// SIVA voice assistant stack (F7 voicefetch, F8 assistant, F9 dictation)
-// siva-llm runs as a systemd user service (Restart=on-failure) — see modules/home
-spawn-at-startup "sh" "-c" "exec \"$HOME/.local/bin/siva-daemon\""
-// always-on "Hey SIVA" wake word listener (two-stage: openWakeWord + whisper
-// confirmation). Waits politely until the verifier is trained (siva-enroll).
-spawn-at-startup "sh" "-c" "exec \"$HOME/.local/bin/siva-wake\""
-spawn-at-startup "sh" "-c" "exec \"$HOME/.local/bin/siva-voicefetch-daemon\""
-spawn-at-startup "sh" "-c" "exec \"$HOME/.local/bin/siva-type-daemon\""
+// The SIVA stack (F7 voicefetch, F8 assistant, F9 dictation) is NOT spawned
+// here any more: siva.service, siva-wake.service, siva-voicefetch.service,
+// siva-type.service and siva-llama-server.service are systemd user units
+// declared by modules/nixos/siva, so they start under COSMIC too, restart on
+// failure, and log to journalctl --user. See the README.
 
 prefer-no-csd
 
@@ -128,15 +125,18 @@ binds {
     // Quickshell clipboard manager (center-column moved to Mod+Shift+C)
     Mod+C { spawn "qs" "ipc" "call" "clipboard" "toggle"; }
 
-    // SIVA voice assistant stack
+    // SIVA voice assistant stack. These are the toggle *clients* — they send
+    // one JSON message to the daemon's socket (and start the daemon themselves
+    // if the systemd unit is stopped), so they are safe to press at any time.
+    // Resolved from $PATH: the packages are in systemPackages.
     F7 repeat=false hotkey-overlay-title="SIVA Voicefetch: voice models (toggle)" {
-        spawn "sh" "-c" "exec \"$HOME/.local/bin/siva-voicefetch\"";
+        spawn "siva-voicefetch";
     }
     F8 repeat=false hotkey-overlay-title="SIVA: voice assistant (push-to-talk toggle)" {
-        spawn "sh" "-c" "exec \"$HOME/.local/bin/siva\"";
+        spawn "siva";
     }
     F9 repeat=false hotkey-overlay-title="SIVA-Type: AI dictation (toggle)" {
-        spawn "sh" "-c" "exec \"$HOME/.local/bin/siva-type\"";
+        spawn "siva-type";
     }
 
     // Focus movement
