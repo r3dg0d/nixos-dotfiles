@@ -168,6 +168,27 @@ cd "$FLAKE" || fail "cannot enter $FLAKE"
 
 printf '%s╭─ nixos-update ─ %s%s#%s%s\n' "$G" "$W" "$FLAKE" "$HOST" "$N"
 
+# The steps below rewrite flake.lock and pkgs/linux-mainline/pin.json in place.
+# nix reports a file it cannot write as a bare "Permission denied" from inside
+# the lock update — several screens after the input diff it just printed, which
+# reads as though the update itself failed. Checking first turns that into one
+# actionable line, before anything has been downloaded.
+#
+# The usual cause is a checkout that has had root run something in it: a
+# `sudo nix flake update`, or an editor opened under sudo, leaves files owned
+# by root that the user can no longer write.
+check_writable() { # <path> <what>
+  [[ -e $1 ]] || return 0            # will be created; the directory check covers it
+  [[ -w $1 ]] && return 0
+  fail "$2 is not writable by $(id -un): $1
+      owned by $(stat -c '%U:%G' "$1")
+      fix with: sudo chown -R $(id -un):$(id -gn) $FLAKE"
+}
+(( do_flake )) && check_writable "$FLAKE/flake.lock" "flake.lock"
+(( do_kernel )) && check_writable "$FLAKE/pkgs/linux-mainline/pin.json" "the kernel pin"
+[[ -w $FLAKE ]] || fail "the flake directory is not writable by $(id -un): $FLAKE
+      fix with: sudo chown -R $(id -un):$(id -gn) $FLAKE"
+
 # Flakes in a git checkout are built from the git tree, so a file nobody has
 # added yet simply is not there as far as the build is concerned. That failure
 # mode reads as a baffling "attribute missing", so say it plainly up front.
