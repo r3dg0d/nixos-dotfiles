@@ -18,6 +18,11 @@ final: prev: {
   fnkey = final.callPackage ./fnkeys { };
   monitor-brightness = final.callPackage ./monitor-brightness { };
 
+  # Idle screensaver: the NixOS logo animated with terminaltexteffects, one
+  # fullscreen terminal per monitor. Driven by swayidle — see
+  # modules/nixos/desktop/screensaver.nix.
+  nixos-screensaver = final.callPackage ./nixos-screensaver { };
+
   # ---- system maintenance -----------------------------------------------
   nixos-updater = final.callPackage ./nixos-updater { };
 

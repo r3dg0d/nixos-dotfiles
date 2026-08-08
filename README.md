@@ -349,6 +349,77 @@ qs ipc call websearch query "ddcutil" # search without the UI
 
 ---
 
+## 💤 Screensaver
+
+Five minutes with no keyboard or pointer input and the NixOS logo takes over
+both monitors, animated with
+[terminaltexteffects](https://github.com/ChrisBuilds/terminaltexteffects).
+The first key or mouse movement puts the desktop back.
+
+The logo is `nixoslogo-ascii-art.txt`, trimmed of its blank border to 99×47
+characters and installed into the store, so the screensaver does not depend on
+this checkout being present.
+
+```sh
+nixos-screensaver start | stop | toggle | status   # drive it by hand
+systemctl --user status screensaver                # the idle timer
+```
+
+### How it fits together
+
+**swayidle** is the timer, in a user service
+([`modules/nixos/desktop/screensaver.nix`](modules/nixos/desktop/screensaver.nix)).
+It speaks `ext_idle_notifier_v1`, so "no input" means what the compositor says
+it means rather than something polled — and two useful behaviours come free
+with that protocol:
+
+- Apps holding an idle inhibitor suppress the timeout, so a film is not
+  interrupted. This is why swayidle is used rather than hypridle, which can be
+  told to ignore inhibitors.
+- The `resume` event fires on the input that wakes the session, so the
+  keypress that dismisses the screensaver is consumed by it rather than
+  landing in whatever window was underneath.
+
+Worth knowing before wondering why it never appeared: the inhibitor is
+broader than "video". Chromium-based browsers take the wake lock for **any**
+media playback, audio included — a tab quietly playing music holds the
+screensaver off exactly as a fullscreen film does. `wpctl status` shows which
+streams are `[active]`.
+
+**[`nixos-screensaver`](pkgs/nixos-screensaver)** puts it on screen: one
+fullscreen terminal per connected monitor, each running an effect loop that
+picks at random from ~30 tte effects and holds the assembled logo for a beat
+before dissolving into the next. Every effect is passed
+`--final-gradient-stops 00ff41 39ff14 00ff41`, so the animation stays on the
+rice's palette whichever one comes up. (`synthgrid` is the one effect excluded
+for that reason — it is the only one that does not take the flag.)
+
+Two details in there are load-bearing and non-obvious:
+
+- **It uses alacritty, not the ghostty everything else uses.** ghostty
+  defaults to `gtk-single-instance = detect`, so launching it while one is
+  already running hands the request to the existing process instead of
+  starting a new one — and the second monitor silently never gets a window.
+  alacritty forks a fresh process every time.
+- **Font size is the only thing that sizes the logo,** because it is a fixed
+  block of characters and nothing scales it. The failure is one-sided: too
+  small merely looks small, but too large leaves the terminal with fewer than
+  47 rows and tte crops the logo rather than shrinking it. The default 16
+  gives about 55 rows on a 1440px panel; `services.screensaver.fontSize`
+  lowers it for shorter monitors.
+
+niri fullscreens the terminals through a window rule keyed on the
+`nixos-screensaver` app-id — an app-id rather than a title, because a title
+belongs to whatever is running in the terminal and can change underneath you.
+
+```nix
+services.screensaver.timeout = 300;   # seconds of no input
+services.screensaver.fontSize = 16;
+services.screensaver.enable = false;  # turn the whole thing off
+```
+
+---
+
 ## 🎙️ SIVA — a local agentic voice assistant
 
 ![SIVA overlay](assets/siva.png)
@@ -554,6 +625,10 @@ To change it, replace the file in `assets/wallpapers/` and rebuild.
   sysfs node, with cached bus discovery and coalesced writes so it survives a
   held key. See
   [Display brightness](#display-brightness-on-desktop-monitors).
+- **`nixos-screensaver`** — the NixOS logo animated with
+  [terminaltexteffects](https://github.com/ChrisBuilds/terminaltexteffects)
+  across both monitors after five idle minutes. See
+  [Screensaver](#-screensaver).
 - **[SIVA](https://github.com/r3dg0d/siva)** +
   [siva-type](https://github.com/r3dg0d/siva-type) +
   [siva-voicefetch](https://github.com/r3dg0d/siva-voicefetch)
@@ -637,6 +712,7 @@ Papirus-Dark for GTK.
 │   │   ├── hardware/nvidia.nix
 │   │   ├── desktop/{sddm,niri,cosmic,portals,apps}.nix
 │   │   ├── desktop/fnkeys.nix   #   Fn + F1…F12: i2c access + the tools
+│   │   ├── desktop/screensaver.nix  # swayidle → the idle screensaver
 │   │   ├── programs.nix         #   CLI + security tooling
 │   │   ├── services.nix         #   Jellyfin, SearXNG, WiVRn
 │   │   ├── virtualisation.nix   #   libvirt/QEMU
@@ -652,6 +728,7 @@ Papirus-Dark for GTK.
 │   ├── helium.nix               #   the browser: AppImage + Ozone-Wayland wrapper
 │   ├── fnkeys/                  #   the Fn + F1…F12 dispatcher
 │   ├── monitor-brightness/      #   DDC/CI brightness for the ultrawides
+│   ├── nixos-screensaver/       #   idle screensaver + the trimmed logo
 │   ├── sddm-ascii-city.nix · siva/ · siva-type/ · siva-voicefetch/
 │   ├── siva-fetch-assets.nix · davinci-resolve.nix
 │   └── hydralauncher-wayland.nix · quickshell-mirror.nix · mingw32-cc.nix
@@ -830,6 +907,9 @@ nix flake check                           # evaluates AND builds every host
 | `Fn`+`F1`/`F2` does nothing | `monitor-brightness status` — if it says `brightnessctl`, no DDC display answered: check `id` for the `i2c` group (needs a fresh login) and `ls /dev/i2c-*` |
 | Another `Fn` key does nothing | `wev` and press it; the keysym it prints is what the bind in `config/niri/config.kdl` should be named |
 | An `Fn` key works but shows no OSD | quickshell is not running — the action is deliberately independent of it |
+| Screensaver never fires | `systemctl --user status screensaver`; something may be holding an idle inhibitor — check with `nixos-screensaver start` that it works at all |
+| Screensaver logo looks cropped | the terminal has fewer than 47 rows — lower `services.screensaver.fontSize` |
+| Screensaver only covers one monitor | a terminal failed to spawn; `nixos-screensaver stop` then `start`, and check `journalctl --user -u screensaver` |
 | `nixos-update` reports a section error | run `nixos-update-check` by hand; the failing step prints its own message |
 
 ### AppImage apps that paint a blank window

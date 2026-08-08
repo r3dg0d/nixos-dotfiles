@@ -83,6 +83,7 @@
             hydralauncher-wayland
             fnkey
             monitor-brightness
+            nixos-screensaver
             mingw32-cc;
         });
 

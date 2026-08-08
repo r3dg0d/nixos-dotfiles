@@ -15,6 +15,7 @@
     ./desktop/sddm.nix
     ./desktop/niri.nix
     ./desktop/fnkeys.nix
+    ./desktop/screensaver.nix
     ./desktop/cosmic.nix
     ./desktop/portals.nix
     ./desktop/apps.nix

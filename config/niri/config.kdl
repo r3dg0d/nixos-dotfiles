@@ -84,6 +84,21 @@ window-rule {
     clip-to-geometry true
 }
 
+// The screensaver terminals (pkgs/nixos-screensaver). The app-id is the
+// contract: the control script matches on it too, so this rule and that
+// script have to agree. Fullscreen and square — no rounding, no focus ring,
+// no shadow, because none of that belongs on a black screen showing a logo.
+window-rule {
+    match app-id="^nixos-screensaver$"
+
+    open-fullscreen true
+    open-focused true
+    geometry-corner-radius 0
+    clip-to-geometry false
+    focus-ring { off; }
+    shadow { off; }
+}
+
 window-rule {
     match title="^Mirror$"
 
