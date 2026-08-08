@@ -23,6 +23,11 @@
     enable = true;
     wayland.enable = true;
     theme = "ascii-city"; # resolved from the sddm-ascii-city package below
+
+    # QML modules the greeter must be able to import. The theme itself only
+    # needs QtQuick (deliberately: no Qt Quick Controls, so it cannot break on
+    # a missing style), but the greeter shell also pulls in svg icon rendering.
+    extraPackages = with pkgs.qt6; [ qtdeclarative qtsvg ];
   };
 
   environment.systemPackages = [ pkgs.sddm-ascii-city ];
